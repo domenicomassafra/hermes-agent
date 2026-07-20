@@ -18,7 +18,7 @@ Both stores are written from two origins:
 This module lets the user gate those writes per-subsystem with a boolean
 ``write_approval``:
 
-  * ``false`` (default) — write freely (the pre-gate behaviour)
+  * ``false`` (default) — foreground writes freely (the pre-gate behaviour)
   * ``true``            — require approval: do not commit the write; either
     prompt inline (memory, interactive CLI only) or **stage** it to a pending
     store and surface it for the user to approve or reject out-of-band
@@ -29,7 +29,7 @@ the gate stages BOTH to disk, but review affordances differ by subsystem
 (see ``hermes_cli`` slash handlers): memory shows full content, skills show
 metadata + a one-line gist + a ``diff`` escape hatch (CLI/dashboard/file).
 
-Staging is mandatory for background-origin writes (a daemon thread cannot
+Staging is mandatory for every background-origin write (a daemon thread cannot
 block on an interactive prompt) and for gateway sessions (no inline prompt
 channel — review happens via ``/memory pending``). Foreground CLI memory
 writes prompt inline via the dangerous-command approval callback; skill
@@ -262,7 +262,8 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "",
             are small; skills never take the inline path).
 
     Decision matrix:
-        gate off (default)                    → allow (writes flow freely)
+        background review (any config)        → stage
+        gate off + foreground (default)       → allow (writes flow freely)
         gate on, memory + interactive CLI     → inline approve/deny prompt
         gate on, memory + gateway/script/bg   → stage
         gate on, skills (any origin)          → stage (too big to review inline)
@@ -271,14 +272,28 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "",
     delays a write for approval, never silently refuses it. ``blocked`` is
     still produced when the user *actively denies* an inline prompt.
     """
+    background = is_background()
+
+    # Autonomous review has no current user to authorize a persistent change.
+    # Always use the existing pending/approval path, even when foreground write
+    # approval is disabled. This keeps self-improvement useful and reviewable
+    # without allowing a task in one owner scope to patch another owner silently.
+    if background:
+        where = "/skills pending" if subsystem == SKILLS else "/memory pending"
+        return GateDecision(
+            stage=True,
+            message=(
+                "Background self-improvement proposed; not saved. "
+                f"Review with {where}."
+            ),
+        )
+
     if not write_approval_enabled(subsystem):
         return GateDecision(allow=True)
 
-    background = is_background()
-
     # Skills always stage — a SKILL.md is too large to review inline, and a
     # background skill write happens in a daemon thread with no user present.
-    if subsystem == SKILLS or background:
+    if subsystem == SKILLS:
         where = "/skills pending" if subsystem == SKILLS else "/memory pending"
         return GateDecision(
             stage=True,

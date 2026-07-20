@@ -78,6 +78,17 @@ def test_memory_gate_off_allows_write(hermes_home):
     assert wa.pending_count("memory") == 0
 
 
+def test_background_memory_stages_even_when_gate_is_off(hermes_home, monkeypatch):
+    from tools.memory_tool import memory_tool, MemoryStore
+    from tools import write_approval as wa
+    monkeypatch.setattr(wa, "current_origin", lambda: "background_review")
+    store = MemoryStore(); store.load_from_disk()
+    r = json.loads(memory_tool("add", "memory", "cross-scope learning", store=store))
+    assert r.get("staged") is True
+    assert store.memory_entries == []
+    assert wa.list_pending("memory")[0]["origin"] == "background_review"
+
+
 def test_memory_gate_on_no_interactive_stages(hermes_home):
     # Gate on, no approval callback / not a gateway context → stage.
     from tools.memory_tool import memory_tool, MemoryStore
@@ -183,6 +194,18 @@ def test_skill_gate_off_allows_create(hermes_home):
     r = json.loads(smt.skill_manage("create", "free-skill", content=_SKILL))
     assert r.get("success") is True
     assert wa.pending_count("skills") == 0
+
+
+def test_background_skill_stages_even_when_gate_is_off(hermes_home, monkeypatch):
+    import importlib
+    import tools.skill_manager_tool as smt
+    importlib.reload(smt)
+    from tools import write_approval as wa
+    monkeypatch.setattr(wa, "current_origin", lambda: "background_review")
+    r = json.loads(smt.skill_manage("create", "cross-scope-skill", content=_SKILL))
+    assert r.get("staged") is True
+    assert smt._find_skill("cross-scope-skill") is None
+    assert wa.list_pending("skills")[0]["origin"] == "background_review"
 
 
 def test_skill_gate_on_always_stages(hermes_home):
