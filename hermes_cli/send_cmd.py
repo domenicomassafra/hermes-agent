@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from utils import normalize_proxy_env_vars
+
 
 _USAGE_EXIT = 2
 _FAILURE_EXIT = 1
@@ -302,6 +304,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     # gateway config loader (invoked downstream by send_message_tool and by
     # the channel directory) can see platform credentials and home channels.
     _load_hermes_env()
+    normalize_proxy_env_vars()
 
     # --list short-circuits everything else.
     if getattr(args, "list_targets", False):

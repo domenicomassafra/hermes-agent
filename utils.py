@@ -1,6 +1,7 @@
 """Shared utility functions for hermes-agent."""
 
 import errno
+import ipaddress
 import json
 import logging
 import os
@@ -482,6 +483,7 @@ _PROXY_ENV_KEYS = (
     "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
     "https_proxy", "http_proxy", "all_proxy",
 )
+_NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
 
 
 def normalize_proxy_url(proxy_url: str | None) -> str | None:
@@ -505,6 +507,24 @@ def normalize_proxy_env_vars() -> None:
         value = os.getenv(key, "")
         normalized = normalize_proxy_url(value)
         if normalized and normalized != value:
+            os.environ[key] = normalized
+    for key in _NO_PROXY_ENV_KEYS:
+        value = os.getenv(key, "")
+        if not value:
+            continue
+        entries = []
+        for raw_entry in value.split(","):
+            entry = raw_entry.strip()
+            try:
+                network = ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                pass
+            else:
+                if network.version == 6 and "/" in entry:
+                    entry = f"http://[{network.network_address}]/{network.prefixlen}"
+            entries.append(entry)
+        normalized = ",".join(entries)
+        if normalized != value:
             os.environ[key] = normalized
 
 
