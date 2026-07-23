@@ -2491,6 +2491,14 @@ import weakref as _weakref
 _gateway_runner_ref: _weakref.ref = lambda: None
 
 
+def _public_reasoning_summary(agent_result: dict) -> str | None:
+    """Return provider-declared public summary text, never private scratchpad."""
+    summary = agent_result.get("reasoning_summary")
+    if not isinstance(summary, str):
+        return None
+    return summary.strip() or None
+
+
 def _normalize_empty_agent_response(
     agent_result: dict,
     response: str,
@@ -11215,9 +11223,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         session_entry.session_id,
                     )
 
-            # Prepend reasoning/thinking if display is enabled (per-platform).
-            # Mattermost requires explicit per-platform opt-in because this is
-            # scratch text, not ordinary final-answer content.
+            # Prepend only a provider-declared public reasoning summary.
+            # Private ``last_reasoning`` scratchpad is never chat content.
             try:
                 _show_reasoning_effective = _resolve_gateway_display_bool(
                     _load_gateway_config(),
@@ -11234,15 +11241,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     else getattr(self, "_show_reasoning", False)
                 )
             if _show_reasoning_effective and response and not _intentional_silence:
-                last_reasoning = agent_result.get("last_reasoning")
-                if last_reasoning:
-                    # Collapse long reasoning to keep messages readable
-                    lines = last_reasoning.strip().splitlines()
+                reasoning_summary = _public_reasoning_summary(agent_result)
+                if reasoning_summary:
+                    # Collapse long public summaries to keep messages readable.
+                    lines = reasoning_summary.splitlines()
                     if len(lines) > 15:
                         display_reasoning = "\n".join(lines[:15])
                         display_reasoning += f"\n_... ({len(lines) - 15} more lines)_"
                     else:
-                        display_reasoning = last_reasoning.strip()
+                        display_reasoning = reasoning_summary
                     # Render style is per-platform: Discord defaults to "-# "
                     # subtext (native small grey metadata text); other
                     # platforms keep the fenced code block.
@@ -11260,14 +11267,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _quoted = "\n".join(
                             f"-# {ln}" if ln else "-#" for ln in display_reasoning.splitlines()
                         )
-                        response = f"-# 💭 Reasoning\n{_quoted}\n\n{response}"
+                        response = f"-# 💭 Reasoning summary\n{_quoted}\n\n{response}"
                     elif _reasoning_style == "blockquote":
                         _quoted = "\n".join(
                             f"> {ln}" if ln else ">" for ln in display_reasoning.splitlines()
                         )
-                        response = f"> 💭 **Reasoning:**\n{_quoted}\n\n{response}"
+                        response = f"> 💭 **Reasoning summary:**\n{_quoted}\n\n{response}"
                     else:
-                        response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+                        response = f"💭 **Reasoning summary:**\n```\n{display_reasoning}\n```\n\n{response}"
 
             # Runtime-metadata footer — only on the FINAL message of the turn.
             # Off by default (display.runtime_footer.enabled=false).  When
@@ -18393,6 +18400,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return {
                 "final_response": final_response,
                 "last_reasoning": result.get("last_reasoning"),
+                "reasoning_summary": result.get("reasoning_summary"),
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                 "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
                 "completed": result_holder[0].get("completed") if result_holder[0] else None,

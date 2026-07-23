@@ -452,3 +452,15 @@ class TestLoadShowReasoningCoercion:
             tmp_path, monkeypatch,
             'display: {}\n',
         ) is False
+
+
+class TestPublicReasoningSummary:
+    def test_private_scratchpad_is_not_a_public_summary(self):
+        assert gateway_run._public_reasoning_summary(
+            {"last_reasoning": "hidden chain of thought"}
+        ) is None
+
+    def test_provider_public_summary_is_trimmed(self):
+        assert gateway_run._public_reasoning_summary(
+            {"reasoning_summary": "  Checked the two relevant constraints.  "}
+        ) == "Checked the two relevant constraints."
