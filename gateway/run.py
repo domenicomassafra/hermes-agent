@@ -13830,7 +13830,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # shutdown) — the turn ran to completion, so recovery
             # succeeded and subsequent messages should no longer receive
             # the restart-interruption system note.
-            if session_key and _should_clear_resume_pending_after_turn(agent_result):
+            if (
+                session_key
+                and not self._draining
+                and not self._shutdown_event.is_set()
+                and _should_clear_resume_pending_after_turn(agent_result)
+            ):
                 self._clear_restart_failure_count(session_key)
                 try:
                     await self.async_session_store.clear_resume_pending(session_key)
