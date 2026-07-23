@@ -47,6 +47,18 @@ from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
 
+_AUTOMATION_RECAP_SCHEMA = "controlcenter.telegram-recap/v1"
+
+
+def _automation_recap_renderer() -> Path:
+    """Locate the owner-approved renderer without copying its template."""
+    configured = os.environ.get("HERMES_TELEGRAM_RECAP_RENDERER", "").strip()
+    return (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / "ControlCenter" / "tools" / "telegram_recap.py"
+    )
+
 
 def _set_cron_session_title(session_db, session_id, base_title):
     """Robustly title a finished cron session before it is closed.
@@ -85,6 +97,64 @@ def _set_cron_session_title(session_db, session_id, base_title):
             raise
         session_db.set_session_title(session_id, deduped)
         return deduped
+
+def _automation_delivery_refusal(job: dict, reason: str) -> str:
+    """Return a readable warning instead of forwarding raw automation output."""
+    name = str(job.get("name") or job.get("id") or "Automazione")[:60]
+    return "\n".join((
+        f"⚠️ **{name} — Automazione**",
+        "**Stato: Attenzione**",
+        "Il gateway ha bloccato un report automatico non conforme prima dell'invio.",
+        "",
+        "**Cosa è successo**",
+        "- Il job non ha emesso il payload strutturato richiesto.",
+        "",
+        "**Cosa è stato scritto/fatto**",
+        "- Nessun testo tecnico o JSON grezzo è stato inoltrato.",
+        "",
+        "**Problemi**",
+        f"- {reason[:360]}",
+        "",
+        "**Prossimo passo**",
+        "- Aggiorna il sender al contratto recap canonico e consulta la receipt locale.",
+        "",
+        "**Dettagli tecnici**",
+        f"- Receipt: `cron/{str(job.get('id') or 'unknown')}`",
+    ))
+
+
+def _render_automation_delivery(job: dict, output: str) -> str:
+    """Accept only the common structured payload at the automatic send boundary."""
+    try:
+        payload = json.loads(output)
+    except (TypeError, json.JSONDecodeError):
+        return _automation_delivery_refusal(job, "Output legacy rifiutato: atteso payload JSON strutturato.")
+    if not isinstance(payload, dict) or payload.get("schema") != _AUTOMATION_RECAP_SCHEMA:
+        return _automation_delivery_refusal(job, "Schema recap assente o non supportato.")
+    renderer = _automation_recap_renderer()
+    if not renderer.is_file():
+        return _automation_delivery_refusal(job, "Renderer canonico non disponibile sul host.")
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(renderer), "--kind", "payload"],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            creationflags=windows_hide_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return _automation_delivery_refusal(job, "Renderer canonico non eseguibile.")
+    rendered = (completed.stdout or "").strip()
+    if completed.returncode or not rendered:
+        return _automation_delivery_refusal(job, "Renderer canonico ha rifiutato la receipt.")
+    return rendered
+
+
+def _requires_automation_recap(job: dict) -> bool:
+    """Only remote scheduled delivery is constrained; local script use is unchanged."""
+    return _normalize_deliver_value(job.get("deliver", "local")) != "local"
 
 
 def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
@@ -2835,7 +2905,12 @@ def run_job(
                 f"**Status:** script failed\n\n"
                 f"{output}\n"
             )
-            return False, doc, alert, output
+            final_response = (
+                _render_automation_delivery(job, output)
+                if _requires_automation_recap(job)
+                else alert
+            )
+            return False, doc, final_response, output
 
         # Honour the wakeAgent gate as a silent signal — `wakeAgent: false`
         # means "nothing to report this tick", same as empty stdout.
@@ -2871,7 +2946,12 @@ def run_job(
             f"---\n\n"
             f"{output}\n"
         )
-        return True, doc, output, None
+        final_response = (
+            _render_automation_delivery(job, output)
+            if _requires_automation_recap(job)
+            else output
+        )
+        return True, doc, final_response, None
 
     # ---------------------------------------------------------------
     # Default (LLM) path — import and construct the agent machinery now

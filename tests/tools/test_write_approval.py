@@ -9,6 +9,7 @@ subcommand dispatch.
 
 import json
 import os
+import stat
 import tempfile
 import shutil
 
@@ -258,6 +259,21 @@ def test_pending_store_roundtrip(hermes_home):
     assert wa.discard_pending("memory", rec["id"]) is True
     assert wa.pending_count("memory") == 0
     assert wa.get_pending("memory", rec["id"]) is None
+
+
+def test_pending_records_are_owner_private(hermes_home):
+    if os.name != "posix":
+        pytest.skip("POSIX file-mode assertion")
+    from tools import write_approval as wa
+
+    rec = wa.stage_write(
+        "memory",
+        {"action": "add", "target": "user", "content": "private fact"},
+        summary="add private fact",
+        origin="background_review",
+    )
+    path = wa._pending_dir("memory") / f"{rec['id']}.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 # ---------------------------------------------------------------------------
