@@ -510,18 +510,21 @@ class DeliveryRouter:
                 and "message_thread_id" not in send_metadata
                 and not has_explicit_direct_topic
             ):
-                # Legacy private topic/thread ids that were not created by this
-                # send path may still need a reply anchor to stay visible in the
-                # requested lane. Named targets are created above via
-                # createForumTopic and can use message_thread_id directly.
-                reply_anchor = send_metadata.get("telegram_reply_to_message_id")
-                if reply_anchor is None:
-                    raise RuntimeError(
-                        "Telegram private DM topic delivery requires telegram_reply_to_message_id; "
-                        "send to the bare chat or provide a reply anchor"
-                    )
-                send_metadata["thread_id"] = target_thread_id
-                send_metadata["telegram_dm_topic_reply_fallback"] = True
+                # A positive chat id plus a numeric topic id is ambiguous: it can
+                # be an ordinary forum topic or a Bot API Direct Messages topic.
+                # Ask the live adapter. Fail closed to message_thread_id; only a
+                # confirmed channel uses direct_messages_topic_id.
+                chat_info = None
+                get_chat_info = getattr(adapter, "get_chat_info", None)
+                if callable(get_chat_info):
+                    try:
+                        chat_info = await get_chat_info(target.chat_id)
+                    except Exception:
+                        logger.debug("Telegram chat-info probe failed for %s", target.chat_id)
+                if isinstance(chat_info, dict) and chat_info.get("type") == "channel":
+                    send_metadata["direct_messages_topic_id"] = target_thread_id
+                else:
+                    send_metadata["thread_id"] = target_thread_id
             elif "thread_id" not in send_metadata and "message_thread_id" not in send_metadata and not has_explicit_direct_topic:
                 send_metadata["thread_id"] = target_thread_id
         result = await adapter.send(target.chat_id, content, metadata=send_metadata or None)

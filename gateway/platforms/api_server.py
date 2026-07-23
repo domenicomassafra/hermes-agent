@@ -1232,6 +1232,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         route: Optional[Dict[str, Any]] = None,
+        toolset_platform: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1325,7 +1327,14 @@ class APIServerAdapter(BasePlatformAdapter):
             )
 
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        enabled_toolsets = sorted(
+            _get_platform_tools(user_config, toolset_platform or "api_server")
+        )
+
+        if max_tokens is not None:
+            if not isinstance(max_tokens, int) or max_tokens <= 0:
+                raise ValueError("max_tokens must be a positive integer")
+            runtime_kwargs["max_tokens"] = max_tokens
 
         max_iterations = _current_max_iterations()
 
@@ -4022,6 +4031,8 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         route: Optional[Dict[str, Any]] = None,
+        toolset_platform: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -4058,6 +4069,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
                     route=route,
+                    toolset_platform=toolset_platform,
+                    max_tokens=max_tokens,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
