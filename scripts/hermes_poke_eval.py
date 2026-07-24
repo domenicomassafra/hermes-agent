@@ -124,13 +124,20 @@ def _safe_base_url_host(value: Any) -> str | None:
 
 def _identity_file_receipts(hermes_home: Path) -> dict[str, dict[str, Any]]:
     receipts: dict[str, dict[str, Any]] = {}
-    for name in ("SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md"):
-        path = hermes_home / name
+    paths = {
+        "SOUL.md": hermes_home / "SOUL.md",
+        "IDENTITY.md": hermes_home / "IDENTITY.md",
+        "USER.md": hermes_home / "memories" / "USER.md",
+        "MEMORY.md": hermes_home / "memories" / "MEMORY.md",
+    }
+    for name, path in paths.items():
+        relative_path = str(path.relative_to(hermes_home))
         if not path.is_file():
-            receipts[name] = {"present": False}
+            receipts[name] = {"present": False, "path": relative_path}
             continue
         receipts[name] = {
             "present": True,
+            "path": relative_path,
             "sha256": sha256_file(path),
             "bytes": path.stat().st_size,
         }
@@ -449,6 +456,10 @@ async def run_case(
             "identity_files": _identity_file_receipts(hermes_home),
             "skip_memory": bool(getattr(agent, "skip_memory", False)),
             "memory_store_loaded": getattr(agent, "_memory_store", None) is not None,
+            "memory_enabled": bool(getattr(agent, "_memory_enabled", False)),
+            "user_profile_enabled": bool(
+                getattr(agent, "_user_profile_enabled", False)
+            ),
             "memory_manager_loaded": getattr(agent, "_memory_manager", None) is not None,
             "enabled_toolsets": sorted(getattr(agent, "enabled_toolsets", []) or []),
             "gateway_session_key": gateway_session_key,

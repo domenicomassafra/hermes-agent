@@ -145,6 +145,26 @@ def test_atomic_receipt_is_private_and_resume_requires_valid_content(tmp_path):
     )
 
 
+def test_identity_receipt_reads_profile_from_memories_directory(tmp_path):
+    (tmp_path / "SOUL.md").write_text("voice", encoding="utf-8")
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "USER.md").write_text("owner", encoding="utf-8")
+    (memories / "MEMORY.md").write_text("loops", encoding="utf-8")
+
+    receipts = MODULE._identity_file_receipts(tmp_path)
+
+    assert receipts["SOUL.md"]["path"] == "SOUL.md"
+    assert receipts["USER.md"]["path"] == "memories/USER.md"
+    assert receipts["USER.md"]["present"] is True
+    assert receipts["MEMORY.md"]["path"] == "memories/MEMORY.md"
+    assert receipts["MEMORY.md"]["present"] is True
+    assert receipts["IDENTITY.md"] == {
+        "present": False,
+        "path": "IDENTITY.md",
+    }
+
+
 def test_api_adapter_accepts_eval_toolset_platform_and_token_budget():
     from gateway.config import PlatformConfig
     from gateway.platforms.api_server import APIServerAdapter
