@@ -1472,6 +1472,8 @@ def switch_model(
     # OmniRoute managed model declaration
     _managed_cfg = (user_providers or {}).get(target_provider, {}) if isinstance(user_providers, dict) else {}
     _managed_models = _managed_cfg.get("models", {}) if isinstance(_managed_cfg, dict) else {}
+    if target_provider.startswith("curated-") and isinstance(_managed_cfg, dict):
+        api_mode = str(_managed_cfg.get("api_mode") or api_mode).strip()
     if target_provider.startswith("curated-") and new_model in _managed_models:
         validation.update({"accepted": True, "persist": True, "recognized": True, "message": ""})
         validation.pop("corrected_model", None)
@@ -2953,14 +2955,29 @@ def list_picker_providers(
         filtered.append(p)
 
     OMNIROUTE_MANAGED_PICKER_ORDER = ('curated-omniroute', 'curated-opencode-go', 'curated-opencode-zen', 'curated-chatgpt', 'curated-claude', 'curated-local')
-    if isinstance(user_providers, dict) and all(
-        slug in user_providers for slug in OMNIROUTE_MANAGED_PICKER_ORDER
-    ):
-        by_slug = {str(row.get("slug", "")): row for row in filtered}
-        filtered = [
-            by_slug[slug]
-            for slug in OMNIROUTE_MANAGED_PICKER_ORDER
-            if slug in by_slug
-        ]
+    if isinstance(user_providers, dict):
+        for row in filtered:
+            slug = str(row.get("slug", ""))
+            cfg = user_providers.get(slug) if slug else None
+            cfg_models = cfg.get("models", {}) if isinstance(cfg, dict) else {}
+            if isinstance(cfg_models, dict):
+                labels = {}
+                for model_id, metadata in cfg_models.items():
+                    if not isinstance(model_id, str):
+                        continue
+                    label = None
+                    if isinstance(metadata, dict):
+                        label = metadata.get("display_name") or metadata.get("name")
+                    if isinstance(label, str) and label.strip():
+                        labels[model_id] = label.strip()
+                if labels:
+                    row["model_display_names"] = labels
+        if all(slug in user_providers for slug in OMNIROUTE_MANAGED_PICKER_ORDER):
+            by_slug = {str(row.get("slug", "")): row for row in filtered}
+            filtered = [
+                by_slug[slug]
+                for slug in OMNIROUTE_MANAGED_PICKER_ORDER
+                if slug in by_slug
+            ]
 
     return filtered

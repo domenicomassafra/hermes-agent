@@ -5338,7 +5338,10 @@ class TelegramAdapter(BasePlatformAdapter):
             # Build provider buttons — folds provider groups (display only).
             keyboard, provider_page_info = self._build_provider_keyboard(providers, 0)
 
-            provider_label = get_label(current_provider)
+            provider_label = next(
+                (p.get("name") for p in providers if p.get("slug") == current_provider),
+                get_label(current_provider),
+            )
             text = self.format_message(
                 (
                     f"⚙ *Model Configuration*\n\n"
@@ -5367,9 +5370,14 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
             # Store picker state keyed by chat_id
+            display_names = {}
+            for provider in providers:
+                if isinstance(provider, dict):
+                    display_names.update(provider.get("model_display_names") or {})
             self._model_picker_state[str(chat_id)] = {
                 "msg_id": msg.message_id,
                 "providers": providers,
+                "model_display_names": display_names,
                 "session_key": session_key,
                 "on_model_selected": on_model_selected,
                 "current_model": current_model,
@@ -5590,9 +5598,10 @@ class TelegramAdapter(BasePlatformAdapter):
         page_models = models[start:end]
 
         buttons: list = []
+        display_names = getattr(self, "_current_model_display_names", {}) or {}
         for i, model_id in enumerate(page_models):
             abs_idx = start + i
-            short = model_id.split("/")[-1] if "/" in model_id else model_id
+            short = display_names.get(model_id) or (model_id.split("/")[-1] if "/" in model_id else model_id)
             if len(short) > 38:
                 short = short[:35] + "..."
             buttons.append(
@@ -5651,6 +5660,7 @@ class TelegramAdapter(BasePlatformAdapter):
             state["model_list"] = models
             state["model_page"] = 0
 
+            self._current_model_display_names = state.get("model_display_names", {})
             keyboard, page_info = self._build_model_keyboard(models, 0)
 
             pname = provider.get("name", provider_slug)
@@ -5721,7 +5731,10 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
             try:
-                provider_label = get_label(state["current_provider"])
+                provider_label = next(
+                    (p.get("name") for p in state["providers"] if p.get("slug") == state["current_provider"]),
+                    get_label(state["current_provider"]),
+                )
             except Exception:
                 provider_label = state["current_provider"]
 

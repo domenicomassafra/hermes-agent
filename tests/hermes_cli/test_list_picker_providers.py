@@ -115,6 +115,35 @@ def test_non_openrouter_rows_passed_through_unchanged(monkeypatch):
     assert result[1]["models"] == ["gemini-3-flash-preview"]
 
 
+def test_curated_picker_carries_configured_model_display_names(monkeypatch):
+    model_id = "opencode-go/deepseek-v4-flash"
+    base = [
+        _make_provider("curated-opencode-go", models=[model_id]),
+    ]
+    user_providers = {
+        "curated-opencode-go": {
+            "models": {
+                model_id: {"display_name": "DeepSeek V4 Flash"},
+            }
+        }
+    }
+
+    monkeypatch.setattr(
+        model_switch,
+        "list_authenticated_providers",
+        lambda **kw: list(base),
+    )
+
+    result = model_switch.list_picker_providers(
+        user_providers=user_providers,
+        max_models=50,
+    )
+
+    assert result[0]["model_display_names"] == {
+        model_id: "DeepSeek V4 Flash",
+    }
+
+
 def test_include_moa_adds_virtual_provider_with_named_presets(monkeypatch):
     """Gateway pickers opt into a virtual MoA provider so presets are tappable."""
     base = [_make_provider("minimax", models=["MiniMax-M3"])]
