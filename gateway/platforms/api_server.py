@@ -2055,6 +2055,8 @@ class APIServerAdapter(BasePlatformAdapter):
         requested_provider: Optional[str] = None,
         model_options: Optional[Dict[str, Any]] = None,
         route: Optional[Dict[str, Any]] = None,
+        toolset_platform: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -2210,7 +2212,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     request_provider or "",
                 )
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        enabled_toolsets = sorted(
+            _get_platform_tools(user_config, toolset_platform or "api_server")
+        )
+
+        if max_tokens is not None:
+            if not isinstance(max_tokens, int) or max_tokens <= 0:
+                raise ValueError("max_tokens must be a positive integer")
+            runtime_kwargs["max_tokens"] = max_tokens
 
         max_iterations = _current_max_iterations()
 

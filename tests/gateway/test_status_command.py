@@ -13,6 +13,12 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
+@pytest.fixture(autouse=True)
+def _disable_runtime_footer(monkeypatch):
+    """Keep status tests independent from the owner's live display config."""
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+
+
 def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
     return SessionSource(
         platform=platform,
@@ -71,6 +77,8 @@ def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.T
     runner._send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
+    runner._shutdown_event = MagicMock()
+    runner._shutdown_event.is_set.return_value = False
     return runner
 
 

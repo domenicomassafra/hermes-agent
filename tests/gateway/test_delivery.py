@@ -236,6 +236,11 @@ class RecordingAdapter:
         return "38049"
 
 
+class ChannelRecordingAdapter(RecordingAdapter):
+    async def get_chat_info(self, chat_id):
+        return {"type": "channel", "id": chat_id}
+
+
 @pytest.mark.asyncio
 async def test_native_adapter_wins_when_relay_also_fronts_platform(tmp_path, monkeypatch):
     monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
@@ -341,16 +346,21 @@ class StaleTopicAdapter:
 
 
 @pytest.mark.asyncio
-async def test_explicit_telegram_private_thread_requires_reply_anchor(tmp_path, monkeypatch):
+async def test_explicit_telegram_private_thread_defaults_to_message_thread(tmp_path, monkeypatch):
     monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
     adapter = RecordingAdapter()
     router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
     target = DeliveryTarget.parse("telegram:722341991:32344")
 
-    with pytest.raises(RuntimeError, match="requires telegram_reply_to_message_id"):
-        await router._deliver_to_platform(target, "hello", metadata=None)
+    await router._deliver_to_platform(target, "hello", metadata=None)
 
-    assert adapter.calls == []
+    assert adapter.calls == [
+        {
+            "chat_id": "722341991",
+            "content": "hello",
+            "metadata": {"thread_id": "32344"},
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -396,7 +406,7 @@ async def test_named_telegram_private_topic_refreshes_stale_thread_id(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_explicit_telegram_private_thread_uses_reply_fallback_with_anchor(tmp_path, monkeypatch):
+async def test_explicit_telegram_private_thread_preserves_reply_anchor(tmp_path, monkeypatch):
     monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
     adapter = RecordingAdapter()
     router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
@@ -415,8 +425,25 @@ async def test_explicit_telegram_private_thread_uses_reply_fallback_with_anchor(
             "metadata": {
                 "telegram_reply_to_message_id": "9001",
                 "thread_id": "32344",
-                "telegram_dm_topic_reply_fallback": True,
             },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_telegram_channel_dm_topic_uses_direct_topic_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    adapter = ChannelRecordingAdapter()
+    router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
+    target = DeliveryTarget.parse("telegram:722341991:32344")
+
+    await router._deliver_to_platform(target, "hello", metadata=None)
+
+    assert adapter.calls == [
+        {
+            "chat_id": "722341991",
+            "content": "hello",
+            "metadata": {"direct_messages_topic_id": "32344"},
         }
     ]
 
@@ -600,5 +627,4 @@ async def test_save_failure_during_truncation_raises_for_non_chunking_adapter(tm
     # retry (footer needs the path) re-raises.
     with pytest.raises(OSError, match="No space left on device"):
         await router._deliver_to_platform(target, long_content, metadata={"job_id": "job7"})
-
 
