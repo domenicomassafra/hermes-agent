@@ -210,6 +210,47 @@ def test_run_job_no_agent_success_returns_script_stdout(hermes_env):
     assert "RAM 92% on host" in doc
 
 
+def test_remote_no_agent_rejects_legacy_plaintext_before_delivery(hermes_env):
+    """Remote automation must never forward free-form stdout to Telegram."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    script_path = hermes_env / "scripts" / "legacy.sh"
+    script_path.write_text("#!/bin/bash\necho 'blocked_unknown: 5/5 queued'\n")
+    job = create_job(prompt=None, schedule="every 5m", script="legacy.sh", no_agent=True, deliver="telegram")
+    success, _doc, final_response, error = run_job(job)
+    assert success is True
+    assert error is None
+    assert "Stato: Attenzione" in final_response
+    assert "blocked_unknown" not in final_response
+    assert "JSON grezzo" in final_response
+
+
+def test_remote_no_agent_renders_only_structured_payload(hermes_env, monkeypatch):
+    """The scheduler delegates formatting to the configured canonical renderer."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    renderer = hermes_env / "recap_renderer.py"
+    renderer.write_text(
+        "import json, sys\n"
+        "payload = json.load(sys.stdin)\n"
+        "assert payload['schema'] == 'controlcenter.telegram-recap/v1'\n"
+        "print('✅ **Test — MiniPC**\\n**Stato: Completato**')\n"
+    )
+    monkeypatch.setenv("HERMES_TELEGRAM_RECAP_RENDERER", str(renderer))
+    script_path = hermes_env / "scripts" / "structured.sh"
+    script_path.write_text(
+        "#!/bin/bash\n"
+        "echo '{\"schema\":\"controlcenter.telegram-recap/v1\",\"title\":\"Test\",\"host\":\"MiniPC\",\"status\":\"ok\"}'\n"
+    )
+    job = create_job(prompt=None, schedule="every 5m", script="structured.sh", no_agent=True, deliver="telegram")
+    success, _doc, final_response, error = run_job(job)
+    assert success is True
+    assert error is None
+    assert final_response == "✅ **Test — MiniPC**\n**Stato: Completato**"
+
+
 def test_run_job_no_agent_empty_output_is_silent(hermes_env):
     """Empty stdout → SILENT_MARKER, which suppresses delivery downstream."""
     from cron.jobs import create_job

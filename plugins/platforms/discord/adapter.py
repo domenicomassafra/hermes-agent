@@ -6844,7 +6844,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
             try:
                 from hermes_cli.providers import get_label
-                provider_label = get_label(current_provider)
+                # OmniRoute managed picker current label
+                provider_label = next(
+                    (p.get("name") for p in providers if p.get("slug") == current_provider),
+                    get_label(current_provider),
+                )
             except Exception:
                 provider_label = current_provider
 

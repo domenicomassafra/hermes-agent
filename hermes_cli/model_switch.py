@@ -1328,6 +1328,9 @@ def switch_model(
 
     provider_changed = target_provider != current_provider
     provider_label = get_label(target_provider)
+    # OmniRoute managed provider result label
+    if target_provider.startswith("curated-") and isinstance(user_providers, dict):
+        provider_label = (user_providers.get(target_provider) or {}).get("name", provider_label)
     if target_provider == "custom" and current_base_url:
         provider_label = "Custom endpoint"
     if target_provider.startswith("custom:"):
@@ -1465,6 +1468,13 @@ def switch_model(
             "recognized": False,
             "message": f"Could not validate `{new_model}`: {e}",
         }
+
+    # OmniRoute managed model declaration
+    _managed_cfg = (user_providers or {}).get(target_provider, {}) if isinstance(user_providers, dict) else {}
+    _managed_models = _managed_cfg.get("models", {}) if isinstance(_managed_cfg, dict) else {}
+    if target_provider.startswith("curated-") and new_model in _managed_models:
+        validation.update({"accepted": True, "persist": True, "recognized": True, "message": ""})
+        validation.pop("corrected_model", None)
 
     # Override rejection if model is in the user's saved provider config.
     # API /v1/models may not list cloud/aliased models even though the server supports them.
@@ -1762,27 +1772,65 @@ def list_authenticated_providers(
     def _norm_url(url: str) -> str:
         return str(url or "").strip().rstrip("/").lower()
 
+    def _effective_builtin_endpoint(slug: str) -> str:
+        """Return a built-in provider's effective endpoint, including env overrides."""
+        try:
+            from hermes_cli.auth import PROVIDER_REGISTRY as _reg
+        except Exception:
+            return ""
+        pcfg = _reg.get(slug)
+        if not pcfg:
+            return ""
+        url = ""
+        if getattr(pcfg, "base_url_env_var", ""):
+            url = os.environ.get(pcfg.base_url_env_var, "") or ""
+        if not url:
+            url = getattr(pcfg, "inference_base_url", "") or ""
+        return _norm_url(url)
+
     def _record_builtin_endpoint(slug: str) -> None:
         """Record the effective base URL for a built-in provider row.
 
         Prefers the live env-override (e.g. DASHSCOPE_BASE_URL) over the
         static inference_base_url so the dedup matches what a user typing
         that URL into custom_providers would actually hit."""
-        try:
-            from hermes_cli.auth import PROVIDER_REGISTRY as _reg
-        except Exception:
-            return
-        pcfg = _reg.get(slug)
-        if not pcfg:
-            return
-        url = ""
-        if getattr(pcfg, "base_url_env_var", ""):
-            url = os.environ.get(pcfg.base_url_env_var, "") or ""
-        if not url:
-            url = getattr(pcfg, "inference_base_url", "") or ""
-        normed = _norm_url(url)
+        normed = _effective_builtin_endpoint(slug)
         if normed:
             _builtin_endpoints.add(normed)
+
+    def _explicit_catalog_overlay_replacements() -> set[tuple[str, str]]:
+        """Identify explicit user catalogs that deliberately replace an overlay.
+
+        A matching label or a matching URL alone is insufficient: provider names
+        are user-facing and relays may host multiple providers.  A replacement is
+        only proven when the user disabled discovery, supplied a non-empty catalog
+        whose every model carries the built-in provider namespace, and pointed it
+        at that overlay's effective endpoint.  This lets an owner curate stable,
+        fully-qualified IDs without losing unrelated providers on the same relay.
+        """
+        replacements: set[tuple[str, str]] = set()
+        if not isinstance(user_providers, dict):
+            return replacements
+        for _slug, cfg in user_providers.items():
+            if not isinstance(cfg, dict) or cfg.get("discover_models", True) is not False:
+                continue
+            api_url = cfg.get("base_url", "") or cfg.get("api", "") or cfg.get("url", "") or ""
+            endpoint = _norm_url(api_url)
+            catalog = cfg.get("models", {})
+            model_ids = list(catalog) if isinstance(catalog, dict) else list(catalog or [])
+            namespaces = {
+                str(model_id).split("/", 1)[0].strip().lower()
+                for model_id in model_ids
+                if "/" in str(model_id)
+            }
+            if not endpoint or not model_ids or len(namespaces) != 1:
+                continue
+            namespace = next(iter(namespaces))
+            if all(str(model_id).strip().lower().startswith(f"{namespace}/") for model_id in model_ids):
+                replacements.add((namespace, endpoint))
+        return replacements
+
+    _explicit_overlay_replacements = _explicit_catalog_overlay_replacements()
 
     def _has_fast_aws_sdk_signal() -> bool:
         """Return True when explicit AWS auth config is present.
@@ -1872,6 +1920,8 @@ def list_authenticated_providers(
     from hermes_cli.models import _PROVIDER_ALIASES as _CANON_ALIASES
     from hermes_cli.providers import ALIASES as _PROVIDER_ALIAS_TABLE
     for hermes_id, mdev_id in PROVIDER_TO_MODELS_DEV.items():
+        if (hermes_id.lower(), _effective_builtin_endpoint(hermes_id)) in _explicit_overlay_replacements:
+            continue
         # Skip vendor names that are merely aliases routing through an
         # aggregator (e.g. bare "openai" → "openrouter"). These are NOT
         # directly-routable providers: emitting them as their own picker
@@ -2020,6 +2070,16 @@ def list_authenticated_providers(
         if pid.lower() in _excluded or hermes_slug.lower() in _excluded:
             continue
 
+        # An owner may deliberately expose a fixed, fully-qualified catalog
+        # for an overlay through the same endpoint (for example a local relay
+        # that supplies ``opencode-go/...`` IDs).  In that exact case the
+        # configured catalog is authoritative: emitting the overlay first
+        # would show a second group with provider-relative IDs.  Do not key
+        # this on the display name — identity requires both namespace and
+        # effective endpoint, precomputed above from an explicit catalog.
+        if (hermes_slug.lower(), _effective_builtin_endpoint(hermes_slug)) in _explicit_overlay_replacements:
+            continue
+
         # Check if credentials exist
         has_creds = False
         if overlay.auth_type == "aws_sdk":
@@ -2089,16 +2149,23 @@ def list_authenticated_providers(
         # providers the user can switch to, even if they aren't currently
         # configured.
         if not has_creds and hermes_slug == "anthropic":
+            # Respect user opt-out via `moa.picker_hide_anthropic: true` in config.yaml
             try:
-                from agent.anthropic_adapter import (
-                    read_claude_code_credentials,
-                    read_hermes_oauth_credentials,
-                )
-                hermes_creds = read_hermes_oauth_credentials()
-                cc_creds = read_claude_code_credentials()
-                if (hermes_creds and hermes_creds.get("accessToken")) or \
-                   (cc_creds and cc_creds.get("accessToken")):
-                    has_creds = True
+                from hermes_cli.config import load_config
+                _cfg = load_config()
+                _moa_cfg = _cfg.get("moa") or {}
+                if isinstance(_moa_cfg, dict) and _moa_cfg.get("picker_hide_anthropic"):
+                    has_creds = False
+                else:
+                    from agent.anthropic_adapter import (
+                        read_claude_code_credentials,
+                        read_hermes_oauth_credentials,
+                    )
+                    hermes_creds = read_hermes_oauth_credentials()
+                    cc_creds = read_claude_code_credentials()
+                    if (hermes_creds and hermes_creds.get("accessToken")) or \
+                       (cc_creds and cc_creds.get("accessToken")):
+                        has_creds = True
             except Exception as exc:
                 logger.debug("Anthropic external creds check failed: %s", exc)
         if not has_creds:
@@ -2196,6 +2263,8 @@ def list_authenticated_providers(
         _canon_provs = []
 
     for _cp in _canon_provs:
+        if (_cp.slug.lower(), _effective_builtin_endpoint(_cp.slug)) in _explicit_overlay_replacements:
+            continue
         if _cp.slug.lower() in seen_slugs:
             continue
         if _cp.slug.lower() in _excluded:
@@ -2882,5 +2951,16 @@ def list_picker_providers(
         if not has_models and not is_custom_endpoint:
             continue
         filtered.append(p)
+
+    OMNIROUTE_MANAGED_PICKER_ORDER = ('curated-omniroute', 'curated-opencode-go', 'curated-opencode-zen', 'curated-chatgpt', 'curated-claude', 'curated-local')
+    if isinstance(user_providers, dict) and all(
+        slug in user_providers for slug in OMNIROUTE_MANAGED_PICKER_ORDER
+    ):
+        by_slug = {str(row.get("slug", "")): row for row in filtered}
+        filtered = [
+            by_slug[slug]
+            for slug in OMNIROUTE_MANAGED_PICKER_ORDER
+            if slug in by_slug
+        ]
 
     return filtered
