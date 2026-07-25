@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 
+from agent.file_safety import coerce_protected_write_roots
 from hermes_cli.config import get_hermes_home
 from agent.secret_scope import current_secret_scope, get_secret as _get_secret
 from utils import is_truthy_value
@@ -930,6 +931,11 @@ class GatewayConfig:
     # disables sd_notify at runtime.
     systemd_watchdog_seconds: int = 0
 
+    # Domain-owned roots that generic agent tools must not write. On Linux
+    # systemd installs these are also projected as ReadOnlyPaths so terminal,
+    # execute_code, and child processes cannot bypass the domain writer.
+    protected_write_roots: tuple[str, ...] = ()
+
     # In-process event-loop liveness watchdog (#69089). A daemon OS thread
     # probes the gateway loop with call_soon_threadsafe; after consecutive
     # missed probes it dumps all-thread stacks and hard-exits with the
@@ -958,6 +964,9 @@ class GatewayConfig:
     def __post_init__(self) -> None:
         self.systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
             self.systemd_watchdog_seconds
+        )
+        self.protected_write_roots = coerce_protected_write_roots(
+            self.protected_write_roots
         )
 
     def get_connected_platforms(self) -> List[Platform]:
@@ -1071,6 +1080,7 @@ class GatewayConfig:
             "max_concurrent_sessions": self.max_concurrent_sessions,
             "multiplex_profiles": self.multiplex_profiles,
             "systemd_watchdog_seconds": self.systemd_watchdog_seconds,
+            "protected_write_roots": list(self.protected_write_roots),
             "loop_watchdog": self.loop_watchdog,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
@@ -1143,6 +1153,14 @@ class GatewayConfig:
         systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
             systemd_watchdog_raw, systemd_watchdog_key
         )
+        if "protected_write_roots" in data:
+            protected_write_roots_raw = data.get("protected_write_roots")
+        else:
+            security = data.get("security") if isinstance(data.get("security"), dict) else {}
+            protected_write_roots_raw = security.get("protected_write_roots")
+        protected_write_roots = coerce_protected_write_roots(
+            protected_write_roots_raw
+        )
         if "loop_watchdog" in data:
             loop_watchdog_raw = data.get("loop_watchdog")
         else:
@@ -1208,6 +1226,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
             systemd_watchdog_seconds=systemd_watchdog_seconds,
+            protected_write_roots=protected_write_roots,
             loop_watchdog=loop_watchdog,
             max_concurrent_sessions=max_concurrent_sessions,
             unauthorized_dm_behavior=unauthorized_dm_behavior,
@@ -1369,6 +1388,12 @@ def load_gateway_config() -> GatewayConfig:
                     gw_data["systemd_watchdog_seconds"] = gateway_section[
                         "systemd_watchdog_seconds"
                     ]
+
+            security_section = yaml_cfg.get("security")
+            if isinstance(security_section, dict) and "protected_write_roots" in security_section:
+                gw_data["protected_write_roots"] = security_section[
+                    "protected_write_roots"
+                ]
 
             if "max_concurrent_sessions" in yaml_cfg:
                 gw_data["max_concurrent_sessions"] = yaml_cfg["max_concurrent_sessions"]

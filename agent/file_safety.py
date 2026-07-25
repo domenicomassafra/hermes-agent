@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 def _hermes_home_path() -> Path:
@@ -98,8 +102,89 @@ def get_safe_write_roots() -> set[str]:
     return roots
 
 
+def coerce_protected_write_roots(
+    value: Any,
+    *,
+    home: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Normalize owner-configured roots that generic tools must not write.
+
+    The setting is intentionally root-based: protecting a vault or other
+    domain-owned store must survive renames below that root. Relative paths,
+    the filesystem root, NULs, and newlines are rejected so a malformed config
+    cannot accidentally make the entire host read-only.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = list(value)
+    else:
+        logger.warning(
+            "Ignoring invalid security.protected_write_roots=%r "
+            "(expected an absolute path or list of absolute paths)",
+            value,
+        )
+        return ()
+
+    base_home = Path(home) if home is not None else Path.home()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            logger.warning(
+                "Ignoring non-string security.protected_write_roots entry %r",
+                candidate,
+            )
+            continue
+        raw = candidate.strip()
+        if not raw or "\x00" in raw or "\n" in raw or "\r" in raw:
+            logger.warning("Ignoring invalid security.protected_write_roots entry")
+            continue
+        if raw == "~" or raw.startswith(f"~{os.sep}"):
+            raw = str(base_home) + raw[1:]
+        raw = os.path.expandvars(raw)
+        path = Path(raw)
+        if not path.is_absolute():
+            logger.warning(
+                "Ignoring relative security.protected_write_roots entry %r",
+                candidate,
+            )
+            continue
+        resolved = os.path.realpath(str(path))
+        if resolved == os.path.sep:
+            logger.warning("Ignoring filesystem root in security.protected_write_roots")
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            normalized.append(resolved)
+    return tuple(normalized)
+
+
+def get_protected_write_roots() -> tuple[str, ...]:
+    """Read the active profile's protected roots through the canonical loader."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        raw = load_config_readonly()
+    except Exception:
+        logger.warning(
+            "Could not load security.protected_write_roots; ignoring the optional guard",
+            exc_info=True,
+        )
+        return ()
+    security = raw.get("security") if isinstance(raw, dict) else None
+    if not isinstance(security, dict):
+        return ()
+    return coerce_protected_write_roots(
+        security.get("protected_write_roots"),
+        home=Path.home(),
+    )
+
+
 def _classify_write_denial(path: str) -> Optional[str]:
-    """Return ``'credential'``, ``'safe_root'``, or ``None`` if writes are allowed."""
+    """Return the denial class or ``None`` when a generic write is allowed."""
     home = os.path.realpath(os.path.expanduser("~"))
     resolved = os.path.realpath(os.path.expanduser(str(path)))
 
@@ -108,6 +193,10 @@ def _classify_write_denial(path: str) -> Optional[str]:
     for prefix in build_write_denied_prefixes(home):
         if resolved.startswith(prefix):
             return "credential"
+
+    for protected_root in get_protected_write_roots():
+        if resolved == protected_root or resolved.startswith(protected_root + os.sep):
+            return "protected_root"
 
     mcp_tokens_dir_name = "mcp-tokens"
 
@@ -173,6 +262,12 @@ def get_write_denied_error(path: str, *, verb: str = "Write") -> Optional[str]:
         return (
             f"{verb} denied: '{path}' is outside HERMES_WRITE_SAFE_ROOT "
             f"({roots_display}). Unset the variable or add this path's directory prefix."
+        )
+    if denial == "protected_root":
+        return (
+            f"{verb} denied: '{path}' is under a domain-protected root. "
+            "Use the configured domain-specific tool or service; generic file "
+            "tools must not bypass its validation or rollback contract."
         )
     return f"{verb} denied: '{path}' is a protected system/credential file."
 

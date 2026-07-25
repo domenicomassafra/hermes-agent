@@ -2750,6 +2750,40 @@ def _systemd_watchdog_service_fields(
     return "notify", f"NotifyAccess=main\nWatchdogSec={seconds}s\n"
 
 
+def _systemd_read_only_path_directives(
+    hermes_home: str | Path | None = None,
+) -> str:
+    """Render configured domain roots as systemd read-only mount namespaces."""
+    override_token = None
+    reset_home_override = None
+    if hermes_home is not None:
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+
+        override_token = set_hermes_home_override(hermes_home)
+        reset_home_override = reset_hermes_home_override
+    try:
+        config = load_gateway_config()
+        roots = tuple(getattr(config, "protected_write_roots", ()) or ())
+    except Exception:
+        logger.debug(
+            "Could not resolve effective protected write roots",
+            exc_info=True,
+        )
+        roots = ()
+    finally:
+        if override_token is not None and reset_home_override is not None:
+            reset_home_override(override_token)
+
+    lines = []
+    for root in roots:
+        escaped = str(root).replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'ReadOnlyPaths="{escaped}"')
+    return "".join(f"{line}\n" for line in lines)
+
+
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
     python_path = get_python_path()
     working_dir = _stable_service_working_dir()
@@ -2792,6 +2826,9 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         systemd_type, systemd_watchdog_directives = _systemd_watchdog_service_fields(
             hermes_home
         )
+        systemd_read_only_directives = _systemd_read_only_path_directives(
+            hermes_home
+        )
         profile_arg = _profile_arg_for_target_user(hermes_home, home_dir)
         # Remap all paths that may resolve under the calling user's home
         # (e.g. /root/) to the target user's home so the service can
@@ -2819,7 +2856,7 @@ Type={systemd_type}
 Group={group_name}
 ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run
 WorkingDirectory={working_dir}
-Environment="HOME={home_dir}"
+{systemd_read_only_directives}Environment="HOME={home_dir}"
 Environment="USER={username}"
 Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
@@ -2845,6 +2882,7 @@ WantedBy=multi-user.target
     systemd_type, systemd_watchdog_directives = _systemd_watchdog_service_fields(
         hermes_home
     )
+    systemd_read_only_directives = _systemd_read_only_path_directives(hermes_home)
     profile_arg = _profile_arg(hermes_home)
     path_entries.extend(_build_user_local_paths(Path.home(), path_entries))
     path_entries.extend(_build_wsl_interop_paths(path_entries))
@@ -2860,7 +2898,7 @@ StartLimitIntervalSec=0
 Type={systemd_type}
 {systemd_watchdog_directives}ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run
 WorkingDirectory={working_dir}
-Environment="PATH={sane_path}"
+{systemd_read_only_directives}Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
 Restart=always

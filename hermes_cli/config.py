@@ -2796,6 +2796,12 @@ DEFAULT_CONFIG = {
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
         "redact_secrets": True,
+        # Domain-owned roots that generic file tools must not write. Linux
+        # systemd gateway installs also project these as ReadOnlyPaths so
+        # terminal, execute_code, and child processes cannot bypass the domain
+        # writer. Use absolute root paths; internal folder renames need no
+        # config update.
+        "protected_write_roots": [],
         "tirith_enabled": True,
         "tirith_path": "tirith",
         "tirith_timeout": 5,

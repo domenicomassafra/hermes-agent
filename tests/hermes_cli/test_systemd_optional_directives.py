@@ -12,6 +12,8 @@ from both the installed and expected text before comparison.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -131,6 +133,40 @@ WantedBy=default.target
             _strip_optional_systemd_directives(expected)
         )
         assert norm_installed == norm_expected
+
+
+class TestSystemdProtectedWriteRoots:
+    def test_gateway_config_reads_domain_roots(self, tmp_path):
+        from gateway.config import GatewayConfig
+
+        vault = tmp_path / "Obsidian"
+        config = GatewayConfig.from_dict(
+            {"security": {"protected_write_roots": [str(vault)]}}
+        )
+
+        assert config.protected_write_roots == (str(vault),)
+
+    def test_rendered_unit_makes_domain_roots_read_only(
+        self, tmp_path, monkeypatch
+    ):
+        from hermes_cli import gateway as gw
+
+        vault = tmp_path / "Obsidian Vault"
+        monkeypatch.setattr(
+            gw,
+            "load_gateway_config",
+            lambda: SimpleNamespace(
+                protected_write_roots=(str(vault),),
+                systemd_watchdog_seconds=0,
+            ),
+        )
+
+        directives = gw._systemd_read_only_path_directives()
+        unit = gw.generate_systemd_unit(system=False)
+
+        expected = f'ReadOnlyPaths="{vault}"'
+        assert directives.strip() == expected
+        assert unit.count(expected) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,60 @@ class TestStaticDenyList:
         assert _is_write_denied("/etc/shadow") is True
 
 
+class TestProtectedWriteRoots:
+    """Domain roots stay readable but reject generic file mutations."""
+
+    def test_root_and_descendants_are_denied_from_config(
+        self, tmp_path: Path, monkeypatch
+    ):
+        hermes_home = tmp_path / ".hermes"
+        protected_root = tmp_path / "Obsidian"
+        sibling = tmp_path / "code" / "app.py"
+        hermes_home.mkdir()
+        protected_root.mkdir()
+        sibling.parent.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "security:\n"
+            "  protected_write_roots:\n"
+            f"    - {protected_root}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert _is_write_denied(str(protected_root)) is True
+        assert _is_write_denied(str(protected_root / "06-life" / "person.md")) is True
+        assert _is_write_denied(str(sibling)) is False
+
+    def test_invalid_or_overbroad_roots_are_rejected(self, tmp_path: Path):
+        from agent.file_safety import coerce_protected_write_roots
+
+        assert coerce_protected_write_roots(["relative", "/"], home=tmp_path) == ()
+        assert coerce_protected_write_roots(["~/vault"], home=tmp_path) == (
+            str(tmp_path / "vault"),
+        )
+
+    def test_denial_message_routes_to_domain_writer(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from agent.file_safety import get_write_denied_error
+
+        hermes_home = tmp_path / ".hermes"
+        protected_root = tmp_path / "vault"
+        hermes_home.mkdir()
+        protected_root.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "security:\n"
+            f"  protected_write_roots: [{protected_root}]\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        error = get_write_denied_error(str(protected_root / "note.md"))
+        assert error is not None
+        assert "domain-protected root" in error
+        assert "domain-specific tool or service" in error
+
+
 class TestSafeWriteRoot:
     """HERMES_WRITE_SAFE_ROOT should sandbox writes to a specific subtree."""
 
