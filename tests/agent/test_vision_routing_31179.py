@@ -191,6 +191,97 @@ model:
         # Bogus provider/model — capability lookup returns None → permissive.
         assert _main_model_supports_vision("nonexistent-provider", "nonexistent-model") is True
 
+    def test_named_custom_catalog_uses_vision_model_when_main_is_text_only(
+        self, isolated_home
+    ):
+        """A mixed custom catalog reuses its endpoint with a vision model."""
+        _write_config(isolated_home, """
+model:
+  provider: curated-relay
+  default: relay/text-model
+providers:
+  curated-relay:
+    name: Curated Relay
+    base_url: http://relay.test/v1
+    api_key: test-key
+    api_mode: chat_completions
+    models:
+      relay/text-model:
+        vision: false
+        input: [text]
+      relay/vision-model:
+        vision: true
+        input: [text, image]
+auxiliary:
+  vision:
+    provider: auto
+    model: ""
+""")
+        _fresh_modules()
+
+        from agent.auxiliary_client import (
+            get_available_vision_backends,
+            resolve_vision_provider_client,
+            set_runtime_main,
+        )
+
+        set_runtime_main(
+            provider="custom",
+            requested_provider="curated-relay",
+            model="relay/text-model",
+            base_url="http://relay.test/v1",
+            api_key="test-key",
+            api_mode="chat_completions",
+        )
+        provider, client, model = resolve_vision_provider_client(provider="auto")
+
+        assert client is not None
+        assert provider == "custom"
+        assert model == "relay/vision-model"
+        assert get_available_vision_backends() == ["curated-relay"]
+
+    def test_named_custom_catalog_without_vision_model_remains_fail_closed(
+        self, isolated_home
+    ):
+        """Auto must not send image content to the first text-only model."""
+        _write_config(isolated_home, """
+model:
+  provider: curated-text-only
+  default: relay/text-model
+providers:
+  curated-text-only:
+    name: Text Only Relay
+    base_url: http://relay.test/v1
+    api_key: test-key
+    models:
+      relay/text-model:
+        vision: false
+        input: [text]
+auxiliary:
+  vision:
+    provider: auto
+""")
+        _fresh_modules()
+
+        from agent.auxiliary_client import (
+            get_available_vision_backends,
+            resolve_vision_provider_client,
+            set_runtime_main,
+        )
+
+        set_runtime_main(
+            provider="custom",
+            requested_provider="curated-text-only",
+            model="relay/text-model",
+            base_url="http://relay.test/v1",
+            api_key="test-key",
+        )
+        _provider, client, model = resolve_vision_provider_client(provider="auto")
+
+        assert client is None
+        assert model is None
+        assert get_available_vision_backends() == []
+
 
 # ---------------------------------------------------------------------------
 # Fix 3: check_vision_requirements + check_browser_vision_requirements parity

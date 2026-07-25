@@ -548,6 +548,84 @@ def _resolve_provider_vision_default(provider: str) -> Optional[str]:
     except Exception:
         return None
 
+
+def _resolve_configured_vision_model(
+    runtime: Dict[str, Any],
+    provider: str,
+    main_model: str,
+) -> Optional[str]:
+    """Select a vision model from the active provider's configured catalog.
+
+    Named custom providers can expose text-only and multimodal models behind
+    the same endpoint. In auto mode, reuse that endpoint and its credentials
+    while selecting a model whose configured metadata explicitly supports
+    images. The current model wins when it is already multimodal; otherwise
+    the curated catalog order determines the fallback.
+    """
+    try:
+        from agent.image_routing import _lookup_supports_vision
+        from hermes_cli.config import get_compatible_custom_providers, load_config
+    except ImportError:
+        return None
+
+    try:
+        cfg = load_config()
+    except Exception:
+        return None
+    if not isinstance(cfg, dict):
+        return None
+
+    requested_provider = str(runtime.get("requested_provider") or "").strip()
+    provider_names = [
+        name.split(":", 1)[1] if name.startswith("custom:") else name
+        for name in dict.fromkeys(
+            filter(None, (requested_provider, str(provider or "").strip()))
+        )
+    ]
+
+    entries = get_compatible_custom_providers(cfg)
+    for provider_name in provider_names:
+        wanted = provider_name.lower()
+        entry = next(
+            (
+                item for item in entries
+                if wanted in {
+                    str(item.get("provider_key") or "").strip().lower(),
+                    str(item.get("name") or "").strip().lower(),
+                }
+            ),
+            None,
+        )
+        if entry is None:
+            continue
+        raw_models = entry.get("models")
+        if isinstance(raw_models, dict):
+            model_ids = list(raw_models)
+        elif isinstance(raw_models, list):
+            model_ids = [
+                str(item.get("id") or item.get("model") or "").strip()
+                if isinstance(item, dict)
+                else str(item or "").strip()
+                for item in raw_models
+            ]
+        else:
+            continue
+
+        ordered_models: List[str] = []
+        if main_model:
+            ordered_models.append(main_model)
+        ordered_models.extend(model_id for model_id in model_ids if model_id)
+        for candidate in dict.fromkeys(ordered_models):
+            if _lookup_supports_vision(
+                provider,
+                candidate,
+                cfg,
+                requested_provider=provider_name,
+            ) is True:
+                return candidate
+    return None
+
+
 # Providers whose endpoint does not accept image input, even though the
 # provider's broader ecosystem has vision models available elsewhere.  When
 # `auxiliary.vision.provider: auto` sees one of these as the main provider,
@@ -5671,15 +5749,44 @@ def get_available_vision_backends() -> List[str]:
     """
     available: List[str] = []
     # 1. Active provider — if the user configured a provider, try it first.
+    runtime = _normalize_main_runtime(None)
     main_provider = _read_main_provider()
+    main_model = _read_main_model()
+    requested_provider = str(runtime.get("requested_provider") or "").strip()
+    provider_label = requested_provider or main_provider
     if main_provider and main_provider not in {"auto", ""}:
         if main_provider in _VISION_AUTO_PROVIDER_ORDER:
             if _strict_vision_backend_available(main_provider):
                 available.append(main_provider)
         else:
-            client, _ = resolve_provider_client(main_provider, _read_main_model())
+            vision_model = _resolve_configured_vision_model(
+                runtime or {"requested_provider": main_provider},
+                main_provider,
+                main_model,
+            )
+            client = None
+            if vision_model:
+                if (
+                    main_provider == "custom"
+                    and runtime.get("base_url")
+                ):
+                    client, _ = resolve_provider_client(
+                        main_provider,
+                        vision_model,
+                        explicit_base_url=str(runtime["base_url"]),
+                        explicit_api_key=runtime.get("api_key") or None,
+                        api_mode=runtime.get("api_mode") or None,
+                        main_runtime=runtime,
+                        is_vision=True,
+                    )
+                else:
+                    client, _ = resolve_provider_client(
+                        provider_label,
+                        vision_model,
+                        is_vision=True,
+                    )
             if client is not None:
-                available.append(main_provider)
+                available.append(provider_label)
     # 2. OpenRouter, 3. Nous — skip if already covered by main provider.
     for p in _VISION_AUTO_PROVIDER_ORDER:
         if p not in available and _strict_vision_backend_available(p):
@@ -5780,7 +5887,15 @@ def resolve_vision_provider_client(
             # DeepSeek-V4-Flash default) and _main_model_supports_vision can't be
             # trusted to catch that. Only fall back to the chat model when no
             # provider default is available (catalog unreachable).
-            vision_model = _resolve_provider_vision_default(main_provider) or main_model
+            vision_model = (
+                _resolve_provider_vision_default(main_provider)
+                or _resolve_configured_vision_model(
+                    runtime,
+                    main_provider,
+                    main_model,
+                )
+                or main_model
+            )
             if main_provider == "nous":
                 sync_client, default_model = _resolve_strict_vision_backend(
                     main_provider, vision_model
