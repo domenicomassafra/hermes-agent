@@ -19,7 +19,7 @@ from agent.secret_scope import get_secret
 
 logger = logging.getLogger(__name__)
 
-_TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
+_TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(.+?))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
 # Slack conversation IDs: C (public channel), G (private/group channel), D (DM).
 # Must be uppercase alphanumeric, 9+ chars. User IDs (U...) are parsed as
@@ -36,7 +36,7 @@ _SLACK_THREAD_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,}):([^\s:]+)\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
-_NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
+_NUMERIC_TOPIC_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 # Platforms that address recipients by phone number and accept E.164 format
 # (with a leading '+'). Without this, "+15551234567" fails the isdigit() check
 # below and falls through to channel-name resolution, which has no way to
@@ -532,7 +532,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
     if platform_name == "telegram":
         match = _TELEGRAM_TOPIC_TARGET_RE.fullmatch(target_ref)
         if match:
-            return match.group(1), match.group(2), True
+            thread_id = match.group(2)
+            return match.group(1), thread_id.strip() if thread_id else None, True
         from plugins.platforms.telegram.telegram_ids import (
             parse_telegram_username_target,
         )

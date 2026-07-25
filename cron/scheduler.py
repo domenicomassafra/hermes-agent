@@ -1825,6 +1825,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 and looks_like_telegram_private_chat_id(str(chat_id))
                 and _looks_like_int(str(thread_id))
             )
+            is_named_telegram_private_topic = (
+                platform == Platform.TELEGRAM
+                and thread_id is not None
+                and looks_like_telegram_private_chat_id(str(chat_id))
+                and not _looks_like_int(str(thread_id))
+            )
             route_via_dm_topic = is_ambiguous_telegram_topic and _is_channel_dm_topic(
                 runtime_adapter, chat_id, loop, job["id"],
             )
@@ -1850,9 +1856,13 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # adapter route via a plain message_thread_id.
                 route_thread_id = str(thread_id) if thread_id is not None else None
                 route_metadata = {"job_id": job["id"]}
-                if route_thread_id:
+                if route_thread_id and not is_named_telegram_private_topic:
                     route_metadata["thread_id"] = route_thread_id
-                media_metadata = {"thread_id": thread_id} if thread_id else None
+                media_metadata = (
+                    {"thread_id": thread_id}
+                    if thread_id and not is_named_telegram_private_topic
+                    else None
+                )
 
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content.
@@ -2067,6 +2077,23 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         enabled=mirror_this_target and not thread_seeded and not inchannel_seeded,
                     )
             except Exception as e:
+                from gateway.delivery import NamedPrivateTopicUnavailableError
+
+                if (
+                    isinstance(e, NamedPrivateTopicUnavailableError)
+                    and str(job.get("topic_fallback") or "").strip().lower() == "root"
+                    and platform == Platform.TELEGRAM
+                    and looks_like_telegram_private_chat_id(str(chat_id))
+                    and thread_id
+                    and not _looks_like_int(str(thread_id))
+                ):
+                    logger.warning(
+                        "Job '%s': named Telegram topic %r unavailable; "
+                        "using the explicitly configured root-DM fallback",
+                        job["id"],
+                        thread_id,
+                    )
+                    thread_id = None
                 err_msg = f"live adapter delivery to {platform_name}:{chat_id} failed: {e}"
                 if not any(err_msg in err for err in target_errors):
                     target_errors.append(err_msg)

@@ -294,6 +294,17 @@ class TestResolveDeliveryTarget:
             "thread_id": "17",
         }
 
+    def test_explicit_telegram_named_private_topic_target(self):
+        """Named private topics stay separate from the numeric chat id."""
+        job = {
+            "deliver": "telegram:1086028134:📊 Recap automatici",
+        }
+        assert _resolve_delivery_target(job) == {
+            "platform": "telegram",
+            "chat_id": "1086028134",
+            "thread_id": "📊 Recap automatici",
+        }
+
     def test_explicit_telegram_topic_thread_survives_bare_directory_match(self):
         """Exact channel-directory matches must not erase an explicit topic id."""
         job = {
@@ -4350,6 +4361,102 @@ class TestDeliverResultTimeoutCancelsFuture:
         # Forum target routes via message_thread_id (mode 1), not DM-topic.
         sent_metadata = adapter.send.call_args[1]["metadata"]
         assert not sent_metadata.get("direct_messages_topic_id")
+
+    def test_named_private_topic_uses_explicit_root_fallback_when_unavailable(self):
+        """A recap can opt into root-DM fallback without weakening other topics."""
+        from concurrent.futures import Future
+        from gateway.config import Platform
+
+        adapter = MagicMock()
+        adapter.ensure_dm_topic = AsyncMock(return_value=None)
+        adapter.send = AsyncMock()
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.filter_silence_narration = False
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        job = {
+            "id": "named-topic-fallback",
+            "deliver": "telegram:1086028134:📊 Recap automatici",
+            "topic_fallback": "root",
+        }
+
+        def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
+            future = Future()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as exc:  # noqa: BLE001
+                future.set_exception(exc)
+            return future
+
+        standalone = AsyncMock(return_value={"success": True})
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro), \
+             patch("tools.send_message_tool._send_to_platform", standalone):
+            result = _deliver_result(
+                job,
+                "# 🧪 TEST\nTopic fallback.",
+                adapters={Platform.TELEGRAM: adapter},
+                loop=loop,
+            )
+
+        assert result is None
+        adapter.ensure_dm_topic.assert_awaited_once_with(
+            "1086028134", "📊 Recap automatici"
+        )
+        adapter.send.assert_not_awaited()
+        assert standalone.await_args.kwargs["thread_id"] is None
+
+    def test_named_private_topic_does_not_fall_back_without_opt_in(self):
+        """An unavailable topic never leaks into the root DM by default."""
+        from concurrent.futures import Future
+        from gateway.config import Platform
+
+        adapter = MagicMock()
+        adapter.ensure_dm_topic = AsyncMock(return_value=None)
+        adapter.send = AsyncMock()
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.filter_silence_narration = False
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        job = {
+            "id": "named-topic-no-fallback",
+            "deliver": "telegram:1086028134:Private",
+        }
+
+        def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
+            future = Future()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as exc:  # noqa: BLE001
+                future.set_exception(exc)
+            return future
+
+        standalone = AsyncMock(return_value={"error": "topic unavailable"})
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro), \
+             patch("tools.send_message_tool._send_to_platform", standalone):
+            result = _deliver_result(
+                job,
+                "private",
+                adapters={Platform.TELEGRAM: adapter},
+                loop=loop,
+            )
+
+        assert result is not None
+        assert standalone.await_args.kwargs["thread_id"] == "Private"
 
 
 class TestDeliverResultLiveAdapterUnconfirmed:

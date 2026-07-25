@@ -29,6 +29,20 @@ def test_e164_target_still_requires_phone_platform() -> None:
     assert _parse_target_ref("matrix", "+15551234567")[2] is False
 
 
+def test_telegram_named_private_topic_target_is_explicit() -> None:
+    chat_id, thread_id, is_explicit = _parse_target_ref(
+        "telegram", "1086028134:📊 Recap automatici"
+    )
+
+    assert chat_id == "1086028134"
+    assert thread_id == "📊 Recap automatici"
+    assert is_explicit is True
+
+
+def test_discord_thread_target_remains_numeric_only() -> None:
+    assert _parse_target_ref("discord", "123:Recap automatici")[2] is False
+
+
 def test_whatsapp_group_jid_target_is_explicit() -> None:
     chat_id, thread_id, is_explicit = _parse_target_ref(
         "whatsapp", "120363408391911677@g.us"
@@ -89,4 +103,3 @@ def test_send_message_routes_whatsapp_group_jid_without_home_fallback() -> None:
         media_files=[],
         force_document=False,
     )
-

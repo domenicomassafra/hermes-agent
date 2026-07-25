@@ -20,6 +20,10 @@ from hermes_cli.config import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
+
+class NamedPrivateTopicUnavailableError(RuntimeError):
+    """A named Telegram private topic could not be provisioned before send."""
+
 # Cap before gateway-level truncation of cron output for non-chunking platform
 # delivery.  Telegram's hard API limit is 4096; the headroom covers the "full
 # output saved to …" footer appended on truncation.  Adapters that split long
@@ -571,12 +575,12 @@ class DeliveryRouter:
                 named_telegram_private_topic_name = target_thread_id
                 ensure_dm_topic = getattr(adapter, "ensure_dm_topic", None)
                 if ensure_dm_topic is None:
-                    raise RuntimeError(
+                    raise NamedPrivateTopicUnavailableError(
                         "Telegram adapter cannot create named private DM topics"
                     )
                 created_thread_id = await ensure_dm_topic(target.chat_id, target_thread_id)
                 if not created_thread_id:
-                    raise RuntimeError(
+                    raise NamedPrivateTopicUnavailableError(
                         f"Failed to create Telegram private DM topic '{target_thread_id}'"
                     )
                 target_thread_id = str(created_thread_id)
@@ -643,7 +647,6 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
 
 
 
