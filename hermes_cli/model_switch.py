@@ -50,6 +50,15 @@ from agent.models_dev import (
 # be visible so users can pick any model they have access to.
 _UNCAPPED_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencode-go"})
 
+_OMNIROUTE_MANAGED_PICKER_ORDER: tuple[str, ...] = (
+    "curated-omniroute",
+    "curated-opencode-go",
+    "curated-opencode-zen",
+    "curated-chatgpt",
+    "curated-claude",
+    "curated-local",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -2394,7 +2403,6 @@ def list_authenticated_providers(
             # URL, routed by header) and must keep distinct picker rows.
             entry_extra_headers = _extra_headers_from_config(ep_cfg)
             headers_identity = tuple(sorted(entry_extra_headers.items()))
-            group_key = (api_url_norm, credential_identity, api_mode, headers_identity)
 
             # ``default_model`` is the legacy key; ``model`` matches what
             # custom_providers entries use, so accept either.
@@ -2409,6 +2417,23 @@ def list_authenticated_providers(
             for model_id in _declared_model_ids(ep_cfg.get("models", [])):
                 if model_id not in entry_models:
                     entry_models.append(model_id)
+
+            discover = ep_cfg.get("discover_models", True)
+            if isinstance(discover, str):
+                discover = discover.lower() not in {"false", "no", "0"}
+            # An explicit, non-discovered catalog is a logical provider, not a
+            # per-model duplicate. Relays commonly expose several curated
+            # namespaces through one URL and credential; folding those rows by
+            # transport identity alone turns the whole picker into the first
+            # provider (for example one giant OmniRoute row).
+            catalog_identity = ep_name if entry_models and not discover else ""
+            group_key = (
+                api_url_norm,
+                credential_identity,
+                api_mode,
+                headers_identity,
+                catalog_identity,
+            )
 
             if group_key not in ep_groups:
                 # Strip per-model suffix so "Palantir Claude 4.7 Opus" becomes
@@ -2954,7 +2979,6 @@ def list_picker_providers(
             continue
         filtered.append(p)
 
-    OMNIROUTE_MANAGED_PICKER_ORDER = ('curated-omniroute', 'curated-opencode-go', 'curated-opencode-zen', 'curated-chatgpt', 'curated-claude', 'curated-local')
     if isinstance(user_providers, dict):
         for row in filtered:
             slug = str(row.get("slug", ""))
@@ -2972,11 +2996,11 @@ def list_picker_providers(
                         labels[model_id] = label.strip()
                 if labels:
                     row["model_display_names"] = labels
-        if all(slug in user_providers for slug in OMNIROUTE_MANAGED_PICKER_ORDER):
+        if all(slug in user_providers for slug in _OMNIROUTE_MANAGED_PICKER_ORDER):
             by_slug = {str(row.get("slug", "")): row for row in filtered}
             filtered = [
                 by_slug[slug]
-                for slug in OMNIROUTE_MANAGED_PICKER_ORDER
+                for slug in _OMNIROUTE_MANAGED_PICKER_ORDER
                 if slug in by_slug
             ]
 

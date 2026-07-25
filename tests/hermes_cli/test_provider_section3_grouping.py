@@ -12,6 +12,7 @@ import hermes_cli.providers as providers_mod
 from hermes_cli.model_switch import (
     format_model_for_display,
     list_authenticated_providers,
+    list_picker_providers,
 )
 
 
@@ -54,6 +55,70 @@ def test_same_endpoint_same_credential_entries_fold_to_one_row(monkeypatch):
     assert row["slug"] == "palantir-claude46"  # first member's slug wins
     assert row["name"] == "Palantir Claude"    # version suffix stripped
     assert len(row["models"]) == 2
+
+
+def test_curated_catalogs_on_one_relay_remain_separate(monkeypatch):
+    """Explicit catalogs sharing one relay are logical provider rows."""
+    endpoint = "https://relay.example.com/v1"
+    user_providers = {
+        "curated-omniroute": {
+            "name": "OmniRoute",
+            "base_url": endpoint,
+            "api_mode": "openai_chat",
+            "discover_models": False,
+            "models": {"antigravity/gemini": {}},
+        },
+        "curated-opencode-go": {
+            "name": "OpenCode GO",
+            "base_url": endpoint,
+            "api_mode": "openai_chat",
+            "discover_models": False,
+            "models": {
+                "opencode-go/deepseek-v4-flash": {},
+                "opencode-go/kimi-k3": {},
+            },
+        },
+        "curated-opencode-zen": {
+            "name": "OpenCode ZEN",
+            "base_url": endpoint,
+            "api_mode": "openai_chat",
+            "discover_models": False,
+            "models": {"opencode-zen/big-pickle": {}},
+        },
+        "curated-chatgpt": {
+            "name": "Codex",
+            "base_url": endpoint,
+            "api_mode": "openai_chat",
+            "discover_models": False,
+            "models": {"codex/gpt-5.6-sol": {}},
+        },
+        "curated-claude": {
+            "name": "Claude",
+            "base_url": endpoint,
+            "api_mode": "openai_chat",
+            "discover_models": False,
+            "models": {"claude/claude-opus-5": {}},
+        },
+        "curated-local": {
+            "name": "Local",
+            "base_url": endpoint,
+            "api_mode": "openai_chat",
+            "discover_models": False,
+            "models": {"local-mini/gemma4:12b": {}},
+        },
+    }
+
+    rows = list_picker_providers(
+        user_providers=user_providers,
+        custom_providers=[],
+        max_models=50,
+    )
+
+    assert [row["slug"] for row in rows] == list(user_providers)
+    assert rows[1]["models"] == [
+        "opencode-go/deepseek-v4-flash",
+        "opencode-go/kimi-k3",
+    ]
 
 
 def test_different_api_mode_keeps_distinct_rows(monkeypatch):
