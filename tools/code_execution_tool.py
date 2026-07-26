@@ -1141,11 +1141,14 @@ def _execute_remote(
     from tools.ansi_strip import strip_ansi
     stdout_text = strip_ansi(stdout_text)
 
-    # Redact secrets. code_file=True: execute_code output is code-execution
-    # output that often echoes source/config — skip false-positive ENV/JSON/
-    # f-string-template redaction while still masking real credentials.
+    # execute_code output is persisted tool output. Keep ordinary source
+    # display behavior, but fail closed on credential-shaped assignments.
     from agent.redact import redact_sensitive_text
-    stdout_text = redact_sensitive_text(stdout_text, code_file=True)
+    stdout_text = redact_sensitive_text(
+        stdout_text,
+        code_file=True,
+        strict_credential_assignments=True,
+    )
 
     # Build response
     result: Dict[str, Any] = {
@@ -1565,11 +1568,19 @@ def execute_code(
         # The sandbox env-var filter (lines 434-454) blocks os.environ access,
         # but scripts can still read secrets from disk (e.g. open('~/.hermes/.env')).
         # This ensures leaked secrets never enter the model context.
-        # code_file=True: this is code-execution output — skip false-positive
-        # ENV/JSON/f-string-template redaction; real credentials still masked.
+        # Credential-shaped assignments fail closed because these strings cross
+        # the persisted execute_code tool-result boundary.
         from agent.redact import redact_sensitive_text
-        stdout_text = redact_sensitive_text(stdout_text, code_file=True)
-        stderr_text = redact_sensitive_text(stderr_text, code_file=True)
+        stdout_text = redact_sensitive_text(
+            stdout_text,
+            code_file=True,
+            strict_credential_assignments=True,
+        )
+        stderr_text = redact_sensitive_text(
+            stderr_text,
+            code_file=True,
+            strict_credential_assignments=True,
+        )
 
         # Build response
         result: Dict[str, Any] = {

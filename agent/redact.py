@@ -253,25 +253,43 @@ _SAFE_CODE_CREDENTIAL_VALUE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_REDACTED_VALUE_RE = re.compile(r"(?:«redacted[^»]*»|<redacted-secret>)")
 _CODE_STRING_LITERAL_RE = re.compile(
     r"(?P<prefix>[rubf]*)(?P<quote>['\"])(?P<body>.*)(?P=quote)",
     re.IGNORECASE,
 )
 _SOURCE_VALUE_TRAILING_PUNCTUATION = ",;)]}"
-_SOURCE_ATTRIBUTE_MARKERS = frozenset({
-    "config",
-    "credential",
-    "credentials",
-    "settings",
+_SOURCE_USAGE_FIELDS = frozenset({
+    "cached_tokens",
+    "completion_tokens",
+    "input_tokens",
+    "output_tokens",
+    "prompt_tokens",
+    "reasoning_tokens",
+    "total_tokens",
 })
-_SOURCE_USAGE_ROOTS = frozenset({"completion", "response", "result"})
-_SOURCE_CONSTANT_ROOT_SUFFIXES = ("Kind", "Enum", "Type")
+_SOURCE_CONSTANT_ROOTS = frozenset({"ColorEnum", "CredentialType", "TokenKind"})
 
 
 def _split_source_value(value: str) -> tuple[str, str]:
     """Separate syntax punctuation from an unquoted assignment value."""
-    core = value.rstrip(_SOURCE_VALUE_TRAILING_PUNCTUATION)
-    return core, value[len(core):]
+    end = len(value)
+    while end and value[end - 1] in _SOURCE_VALUE_TRAILING_PUNCTUATION:
+        if value[end - 1] in ",;":
+            end -= 1
+            continue
+        try:
+            ast.parse(value[:end], mode="eval")
+        except (SyntaxError, ValueError):
+            end -= 1
+            continue
+        break
+    return value[:end], value[end:]
+
+
+def _is_redacted_value(value: str) -> bool:
+    """Return whether an earlier redaction pass already replaced this value."""
+    return _REDACTED_VALUE_RE.fullmatch(value.strip()) is not None
 
 
 def _is_safe_code_attribute(node: ast.Attribute) -> bool:
@@ -282,29 +300,27 @@ def _is_safe_code_attribute(node: ast.Attribute) -> bool:
         attributes.append(base.attr)
         base = base.value
 
-    if isinstance(base, (ast.Call, ast.Subscript)):
-        return True
     if not isinstance(base, ast.Name):
         return False
 
     root = base.id
-    if root in {"self", "cls", "super"}:
+    path = list(reversed(attributes))
+    if root in {"response", "Response"}:
+        return (
+            len(path) == 2
+            and path[0] == "usage"
+            and path[1] in _SOURCE_USAGE_FIELDS
+        )
+    if root == "self" and len(path) >= 2 and path[0] == "config":
         return True
-    root_name = root.casefold()
-    attribute_names = {attribute.casefold() for attribute in attributes}
-    if root_name in _SOURCE_ATTRIBUTE_MARKERS or (
-        attribute_names & _SOURCE_ATTRIBUTE_MARKERS
-    ):
-        return True
-    if root_name in _SOURCE_USAGE_ROOTS and "usage" in attribute_names:
+    if root == "client" and path == ["credentials", "token"]:
         return True
     return (
-        len(attributes) == 1
-        and any(
-            root.endswith(suffix) and len(root) > len(suffix)
-            for suffix in _SOURCE_CONSTANT_ROOT_SUFFIXES
+        root in _SOURCE_CONSTANT_ROOTS
+        and (
+            (len(path) == 1 and path[0].isupper())
+            or (len(path) == 2 and path[0].isupper() and path[1] == "value")
         )
-        and attributes[0].isupper()
     )
 
 
@@ -315,7 +331,7 @@ def _is_safe_code_credential_value(value: str) -> bool:
     but completely unkeyed opaque values remain intentionally undetectable:
     guessing from entropy would corrupt arbitrary source and tool output.
     """
-    expression = value.strip().rstrip(",;")
+    expression, _ = _split_source_value(value.strip())
     try:
         node = ast.parse(expression, mode="eval").body
     except (SyntaxError, ValueError):
@@ -711,6 +727,7 @@ def redact_sensitive_text(
     force: bool = False,
     code_file: bool = False,
     file_read: bool = False,
+    strict_credential_assignments: bool = False,
     redact_url_credentials: bool = False,
 ) -> str:
     """Apply all redaction patterns to a block of text.
@@ -730,6 +747,11 @@ def redact_sensitive_text(
     constants, "apiKey": "test" fixtures). Prefix patterns, auth headers,
     private keys, DB connstrings, JWTs, and URL secrets are still redacted.
 
+    Set strict_credential_assignments=True at persistence boundaries where a
+    credential-shaped assignment must fail closed even when its value also
+    parses as a valid source expression. Programmatic env lookups remain
+    references rather than credential values and are preserved.
+
     Set file_read=True for file *content* returned to the agent (read_file /
     search_files / cat). Secrets are STILL redacted — they are never exposed —
     but prefix-matched credentials are replaced with a non-reusable sentinel
@@ -738,8 +760,9 @@ def redact_sensitive_text(
     an agent reading it from config.yaml and writing it back silently corrupted
     the stored credential into a dead 13-char value → 401 (issue #35519). The
     sentinel is syntactically invalid as a token, so it can't be mistaken for a
-    usable key or written back as one. Implies code_file=True (config/data
-    files shouldn't trigger the source-code ENV/JSON false-positive paths).
+    usable key or written back as one. Implies ``code_file=True`` and
+    ``strict_credential_assignments=True``: config/data reads do not get the
+    source-display carve-outs.
 
     Performance: each regex pattern is gated behind a cheap substring
     pre-check (e.g. ``"=" in text`` for ENV assignments, ``"://" in text``
@@ -763,6 +786,7 @@ def redact_sensitive_text(
     # paths either (it's config/data, not log lines).
     if file_read:
         code_file = True
+        strict_credential_assignments = True
 
     def _redact_env(m):
         name, quote, value = m.group(1), m.group(2), m.group(3)
@@ -784,7 +808,15 @@ def redact_sensitive_text(
             prefix, name, sep, value = m.groups()
             if not _is_unambiguous_credential_env_name(name):
                 return m.group(0)
-            if _is_safe_code_credential_value(value):
+            expression, _ = _split_source_value(value.strip())
+            if _is_redacted_value(expression):
+                return m.group(0)
+            if _ENV_LOOKUP_VALUE_RE.match(expression):
+                return m.group(0)
+            if (
+                not strict_credential_assignments
+                and _is_safe_code_credential_value(value)
+            ):
                 return m.group(0)
             return f"{prefix}{name}{sep}{_mask_code_credential_value(value)}"
 
@@ -819,9 +851,13 @@ def redact_sensitive_text(
             key, value = m.group(1), m.group(2)
             if not _is_unambiguous_credential_env_name(key):
                 return m.group(0)
-            if _ENV_LOOKUP_VALUE_RE.match(value):
+            if _is_redacted_value(value) or _ENV_LOOKUP_VALUE_RE.match(value):
                 return m.group(0)
-            if code_file and _is_safe_code_credential_value(value):
+            if (
+                code_file
+                and not strict_credential_assignments
+                and _is_safe_code_credential_value(value)
+            ):
                 return m.group(0)
             masker = _mask_token_nonreusable if code_file else _mask_token
             return f'{key}: "{masker(value)}"'
@@ -835,9 +871,13 @@ def redact_sensitive_text(
             key, sep, quote, value = m.group(1), m.group(2), m.group(3), m.group(4)
             if not _is_unambiguous_credential_env_name(key):
                 return m.group(0)
-            if _ENV_LOOKUP_VALUE_RE.match(value):
+            if _is_redacted_value(value) or _ENV_LOOKUP_VALUE_RE.match(value):
                 return m.group(0)
-            if code_file and _is_safe_code_credential_value(value):
+            if (
+                code_file
+                and not strict_credential_assignments
+                and _is_safe_code_credential_value(value)
+            ):
                 return m.group(0)
             masker = _mask_token_nonreusable if code_file else _mask_token
             return f"{key}{sep}{quote}{masker(value)}{quote}"
@@ -848,9 +888,13 @@ def redact_sensitive_text(
             key, sep, value = m.group(1), m.group(2), m.group(3)
             if not _is_unambiguous_credential_env_name(key):
                 return m.group(0)
-            if _ENV_LOOKUP_VALUE_RE.match(value):
+            if _is_redacted_value(value) or _ENV_LOOKUP_VALUE_RE.match(value):
                 return m.group(0)
-            if code_file and _is_safe_code_credential_value(value):
+            if (
+                code_file
+                and not strict_credential_assignments
+                and _is_safe_code_credential_value(value)
+            ):
                 return m.group(0)
             core, suffix = _split_source_value(value) if code_file else (value, "")
             masker = _mask_token_nonreusable if code_file else _mask_token

@@ -1033,6 +1033,7 @@ class TestTerminalOutputRedaction:
         "source",
         [
             "TOKEN=TokenKind.NAME,",
+            "TOKEN=TokenKind.NAME.value",
             "TOKEN=ColorEnum.RED",
             "TOKEN=CredentialType.API",
             "TOKEN=response.usage.prompt_tokens",
@@ -1054,6 +1055,86 @@ class TestTerminalOutputRedaction:
     )
     def test_source_constants_keep_syntax_and_punctuation(self, source):
         assert redact_sensitive_text(source, code_file=True, force=True) == source
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "TOKEN=TokenKind.NAME,",
+            "TOKEN=TokenKind.NAME.value",
+            "TOKEN=get_token();",
+            'TOKEN=config["token"]',
+        ],
+    )
+    def test_preserved_source_assignment_remains_compilable(self, source):
+        result = redact_sensitive_text(source, code_file=True, force=True)
+
+        assert result == source
+        compile(result, "<redaction-source>", "exec")
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "DISCORD_BOT_TOKEN=AbCdEfType.GHIJKL",
+            "DISCORD_BOT_TOKEN=abcdef.config.ghijkl",
+            "DISCORD_BOT_TOKEN=abcdef.credentials.ghijkl",
+            "DISCORD_BOT_TOKEN=abcdef.settings.ghijkl",
+            "DISCORD_BOT_TOKEN=abcdef.usage.ghijkl",
+            "DISCORD_BOT_TOKEN=FakeKind.NAME",
+            "DISCORD_BOT_TOKEN=Response.usage.unapproved_field",
+            "DISCORD_BOT_TOKEN=TokenKind.NAME.other",
+        ],
+    )
+    def test_non_exact_attribute_source_shapes_fail_closed(self, source):
+        result = redact_sensitive_text(source, code_file=True, force=True)
+
+        assert source not in result
+        assert "redacted-secret" in result
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "TOKEN=TokenKind.NAME,",
+            "TOKEN=TokenKind.NAME.value",
+            "TOKEN=ColorEnum.RED",
+            "TOKEN=CredentialType.API",
+            "TOKEN=response.usage.prompt_tokens",
+            "TOKEN=Response.usage.prompt_tokens",
+            "TOKEN=self.config.auth_token",
+            "TOKEN=client.credentials.token",
+            "TOKEN=get_token();",
+            'TOKEN=config["token"]',
+            "TOKEN=wrap(get_token())",
+            'TOKEN=lambda: "fixture"',
+        ],
+    )
+    def test_strict_assignment_boundary_fails_closed_on_source_shapes(self, source):
+        result = redact_sensitive_text(
+            source,
+            code_file=True,
+            force=True,
+            strict_credential_assignments=True,
+        )
+
+        assert source not in result
+        assert "redacted-secret" in result
+
+    def test_strict_assignment_boundary_preserves_env_lookup(self):
+        source = "DISCORD_BOT_TOKEN=os.getenv('DISCORD_BOT_TOKEN')"
+
+        assert redact_sensitive_text(
+            source,
+            code_file=True,
+            force=True,
+            strict_credential_assignments=True,
+        ) == source
+
+    def test_file_read_implies_strict_assignment_boundary(self):
+        source = "TOKEN=TokenKind.NAME"
+
+        result = redact_sensitive_text(source, file_read=True, force=True)
+
+        assert "TokenKind.NAME" not in result
+        assert "redacted-secret" in result
 
     def test_unkeyed_opaque_text_has_an_explicit_non_detection_boundary(self):
         """Unknown opaque blobs need structural context or a known prefix.

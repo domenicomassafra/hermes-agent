@@ -288,6 +288,20 @@ class TestExecuteCode(unittest.TestCase):
             "DISCORD_BOT_TOKEN=ABCDEF.USAGE.GHIJKL",
             "DISCORD_BOT_TOKEN=AbCdEf.GHIJKL",
             "DISCORD_BOT_TOKEN=AbcDef.GHIJKL",
+            "DISCORD_BOT_TOKEN=AbCdEfType.GHIJKL",
+            "DISCORD_BOT_TOKEN=abcdef.config.ghijkl",
+            "DISCORD_BOT_TOKEN=abcdef.credentials.ghijkl",
+            "DISCORD_BOT_TOKEN=abcdef.settings.ghijkl",
+            "DISCORD_BOT_TOKEN=abcdef.usage.ghijkl",
+            "DISCORD_BOT_TOKEN=FakeKind.NAME",
+            "DISCORD_BOT_TOKEN=Response.usage.unapproved_field",
+            "DISCORD_BOT_TOKEN=TokenKind.NAME.other",
+            "TOKEN=TokenKind.NAME",
+            "TOKEN=TokenKind.NAME.value",
+            "TOKEN=Response.usage.prompt_tokens",
+            'TOKEN=config["token"]',
+            "TOKEN=wrap(get_token())",
+            'TOKEN=lambda: "fixture"',
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -296,6 +310,8 @@ class TestExecuteCode(unittest.TestCase):
                 db.create_session("redaction-test", source="cli")
                 for index, probe in enumerate(probes):
                     result = self._run(f"print({probe!r})")
+                    self.assertNotIn(probe, result["output"])
+                    self.assertIn("redacted-secret", result["output"])
                     db.append_message(
                         "redaction-test",
                         role="tool",
@@ -304,29 +320,37 @@ class TestExecuteCode(unittest.TestCase):
                         tool_call_id=f"call-{index}",
                     )
 
-                persisted = json.dumps(
-                    db.get_messages_as_conversation("redaction-test"),
-                    ensure_ascii=False,
-                )
+                messages = db.get_messages_as_conversation("redaction-test")
             finally:
                 db.close()
 
+        persisted = "\n".join(
+            json.loads(message["content"])["output"]
+            for message in messages
+            if message.get("role") == "tool"
+        )
+        for probe in probes:
+            self.assertNotIn(probe, persisted)
         for secret_fragment in (
             "credential-material",
             "quoted-yaml-material",
             "quoted credential with a trailing value",
             "bytes credential with a trailing value",
-            "abcdef.xyzabc.ghijkl",
-            "ABCDEF.XYZABC.GHIJKL",
-            "AbCdEf.GhIjKl.MnOpQr",
-            "AbCdEf_GhIjKl.MnOpQr_StUv",
-            "abcdef.token.ghijkl",
-            "ABCDEF.USAGE.GHIJKL",
-            "AbCdEf.GHIJKL",
-            "AbcDef.GHIJKL",
         ):
             self.assertNotIn(secret_fragment, persisted)
-        self.assertEqual(persisted.count("redacted-secret"), 12)
+        self.assertEqual(persisted.count("redacted-secret"), len(probes))
+
+    def test_stderr_uses_strict_assignment_boundary(self):
+        result = self._run(
+            'import sys\n'
+            'print("TOKEN=TokenKind.NAME", file=sys.stderr)\n'
+            "raise SystemExit(1)"
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertNotIn("TokenKind.NAME", result["output"])
+        self.assertNotIn("TokenKind.NAME", result["error"])
+        self.assertIn("redacted-secret", result["output"])
 
     def test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout(self):
         """A no-tool script should not wait seconds for the idle RPC accept thread."""
