@@ -167,6 +167,10 @@ class TestEnvLookupPreserved:
         text = "api_key=process.env.API_KEY"
         assert redact_sensitive_text(text, force=True) == text
 
+    def test_perl_env_lookup(self):
+        text = "API_TOKEN=$ENV{MY_API_TOKEN}"
+        assert redact_sensitive_text(text, force=True) == text
+
     def test_real_env_value_still_redacted(self):
         text = "HOMEASSISTANT_TOKEN=eyJhbGciOiJIUzI1NiJ9.abc123.xyz"
         result = redact_sensitive_text(text, force=True)
@@ -1118,8 +1122,17 @@ class TestTerminalOutputRedaction:
         assert source not in result
         assert "redacted-secret" in result
 
-    def test_strict_assignment_boundary_preserves_env_lookup(self):
-        source = "DISCORD_BOT_TOKEN=os.getenv('DISCORD_BOT_TOKEN')"
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "DISCORD_BOT_TOKEN=os.getenv('DISCORD_BOT_TOKEN')",
+            "DISCORD_BOT_TOKEN=os.environ['DISCORD_BOT_TOKEN']",
+            "DISCORD_BOT_TOKEN=os.environ.get('DISCORD_BOT_TOKEN')",
+            "DISCORD_BOT_TOKEN=process.env.DISCORD_BOT_TOKEN",
+            "DISCORD_BOT_TOKEN=$ENV{DISCORD_BOT_TOKEN}",
+        ],
+    )
+    def test_strict_assignment_boundary_preserves_complete_env_lookup(self, source):
 
         assert redact_sensitive_text(
             source,

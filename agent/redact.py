@@ -190,7 +190,13 @@ _CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
 # *names*, not secret values. When one appears as the VALUE of a KEY=... match
 # it's a code snippet, not a leaked secret — skip redaction (issue #2852).
 _ENV_LOOKUP_VALUE_RE = re.compile(
-    r"^(?:os\.(?:getenv|environ)|process\.env|\$ENV\{)"
+    r"(?:"
+    r"os\.getenv\([^()\r\n]*\)"
+    r"|os\.environ\[[^\[\]\r\n]+\]"
+    r"|os\.environ\.get\([^()\r\n]*\)"
+    r"|process\.env\.[A-Za-z_$][A-Za-z0-9_$]*"
+    r"|\$ENV\{[^{}\r\n]+\}"
+    r")"
 )
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
 _CFG_DOTTED_RE = re.compile(
@@ -292,6 +298,11 @@ def _is_redacted_value(value: str) -> bool:
     return _REDACTED_VALUE_RE.fullmatch(value.strip()) is not None
 
 
+def _is_env_lookup_value(value: str) -> bool:
+    """Return whether the whole value is one supported environment lookup."""
+    return _ENV_LOOKUP_VALUE_RE.fullmatch(value.strip().rstrip(",;")) is not None
+
+
 def _is_safe_code_attribute(node: ast.Attribute) -> bool:
     """Return whether an attribute chain has unmistakable source-code shape."""
     attributes = []
@@ -331,6 +342,8 @@ def _is_safe_code_credential_value(value: str) -> bool:
     but completely unkeyed opaque values remain intentionally undetectable:
     guessing from entropy would corrupt arbitrary source and tool output.
     """
+    if _is_env_lookup_value(value):
+        return True
     expression, _ = _split_source_value(value.strip())
     try:
         node = ast.parse(expression, mode="eval").body
@@ -343,7 +356,7 @@ def _is_safe_code_credential_value(value: str) -> bool:
         (ast.Await, ast.Call, ast.JoinedStr, ast.Lambda, ast.Subscript),
     ):
         return True
-    if not expression or _ENV_LOOKUP_VALUE_RE.match(expression):
+    if not expression:
         return True
     return _SAFE_CODE_CREDENTIAL_VALUE_RE.fullmatch(expression) is not None
 
@@ -793,7 +806,7 @@ def redact_sensitive_text(
         # Programmatic env lookups reference variable *names*, not
         # secret values — masking them corrupts code snippets in
         # prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
-        if _ENV_LOOKUP_VALUE_RE.match(value):
+        if _is_env_lookup_value(value):
             return m.group(0)
         core, suffix = _split_source_value(value) if not quote else (value, "")
         return f"{name}={quote}{_mask_token(core)}{quote}{suffix}"
@@ -811,7 +824,7 @@ def redact_sensitive_text(
             expression, _ = _split_source_value(value.strip())
             if _is_redacted_value(expression):
                 return m.group(0)
-            if _ENV_LOOKUP_VALUE_RE.match(expression):
+            if _is_env_lookup_value(value):
                 return m.group(0)
             if (
                 not strict_credential_assignments
@@ -851,7 +864,7 @@ def redact_sensitive_text(
             key, value = m.group(1), m.group(2)
             if not _is_unambiguous_credential_env_name(key):
                 return m.group(0)
-            if _is_redacted_value(value) or _ENV_LOOKUP_VALUE_RE.match(value):
+            if _is_redacted_value(value) or _is_env_lookup_value(value):
                 return m.group(0)
             if (
                 code_file
@@ -871,7 +884,7 @@ def redact_sensitive_text(
             key, sep, quote, value = m.group(1), m.group(2), m.group(3), m.group(4)
             if not _is_unambiguous_credential_env_name(key):
                 return m.group(0)
-            if _is_redacted_value(value) or _ENV_LOOKUP_VALUE_RE.match(value):
+            if _is_redacted_value(value) or _is_env_lookup_value(value):
                 return m.group(0)
             if (
                 code_file
@@ -888,7 +901,7 @@ def redact_sensitive_text(
             key, sep, value = m.group(1), m.group(2), m.group(3)
             if not _is_unambiguous_credential_env_name(key):
                 return m.group(0)
-            if _is_redacted_value(value) or _ENV_LOOKUP_VALUE_RE.match(value):
+            if _is_redacted_value(value) or _is_env_lookup_value(value):
                 return m.group(0)
             if (
                 code_file

@@ -296,6 +296,8 @@ class TestExecuteCode(unittest.TestCase):
             "DISCORD_BOT_TOKEN=FakeKind.NAME",
             "DISCORD_BOT_TOKEN=Response.usage.unapproved_field",
             "DISCORD_BOT_TOKEN=TokenKind.NAME.other",
+            "DISCORD_BOT_TOKEN=os.getenvEVILSECRET",
+            "DISCORD_BOT_TOKEN=process.envEVILSECRET",
             "TOKEN=TokenKind.NAME",
             "TOKEN=TokenKind.NAME.value",
             "TOKEN=Response.usage.prompt_tokens",
