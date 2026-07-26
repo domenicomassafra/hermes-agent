@@ -297,7 +297,10 @@ class TestExecuteCode(unittest.TestCase):
             "DISCORD_BOT_TOKEN=Response.usage.unapproved_field",
             "DISCORD_BOT_TOKEN=TokenKind.NAME.other",
             "DISCORD_BOT_TOKEN=os.getenvEVILSECRET",
+            "DISCORD_BOT_TOKEN=os.environEVILSECRET",
+            "DISCORD_BOT_TOKEN=os.environ.getEVILSECRET",
             "DISCORD_BOT_TOKEN=process.envEVILSECRET",
+            "DISCORD_BOT_TOKEN=$ENV{DISCORD_BOT_TOKEN}EVILSECRET",
             "TOKEN=TokenKind.NAME",
             "TOKEN=TokenKind.NAME.value",
             "TOKEN=Response.usage.prompt_tokens",
@@ -342,6 +345,22 @@ class TestExecuteCode(unittest.TestCase):
             self.assertNotIn(secret_fragment, persisted)
         self.assertEqual(persisted.count("redacted-secret"), len(probes))
 
+    def test_complete_env_lookups_survive_execute_code_output(self):
+        lookups = (
+            "DISCORD_BOT_TOKEN=os.getenv('DISCORD_BOT_TOKEN')",
+            "DISCORD_BOT_TOKEN=os.environ['DISCORD_BOT_TOKEN']",
+            "DISCORD_BOT_TOKEN=os.environ.get('DISCORD_BOT_TOKEN')",
+            "DISCORD_BOT_TOKEN=process.env.DISCORD_BOT_TOKEN",
+            "DISCORD_BOT_TOKEN=$ENV{DISCORD_BOT_TOKEN}",
+        )
+
+        for lookup in lookups:
+            with self.subTest(lookup=lookup):
+                result = self._run(f"print({lookup!r})")
+                self.assertEqual(result["status"], "success")
+                self.assertIn(lookup, result["output"])
+                self.assertNotIn("redacted-secret", result["output"])
+
     def test_stderr_uses_strict_assignment_boundary(self):
         result = self._run(
             'import sys\n'
@@ -353,6 +372,27 @@ class TestExecuteCode(unittest.TestCase):
         self.assertNotIn("TokenKind.NAME", result["output"])
         self.assertNotIn("TokenKind.NAME", result["error"])
         self.assertIn("redacted-secret", result["output"])
+
+    def test_stderr_redacts_env_lookup_prefix_lookalikes(self):
+        probes = (
+            "DISCORD_BOT_TOKEN=os.getenvEVILSECRET",
+            "DISCORD_BOT_TOKEN=os.environEVILSECRET",
+            "DISCORD_BOT_TOKEN=os.environ.getEVILSECRET",
+            "DISCORD_BOT_TOKEN=process.envEVILSECRET",
+            "DISCORD_BOT_TOKEN=$ENV{DISCORD_BOT_TOKEN}EVILSECRET",
+        )
+
+        for probe in probes:
+            with self.subTest(probe=probe):
+                result = self._run(
+                    "import sys\n"
+                    f"print({probe!r}, file=sys.stderr)\n"
+                    "raise SystemExit(1)"
+                )
+                self.assertEqual(result["status"], "error")
+                self.assertNotIn("EVILSECRET", result["output"])
+                self.assertNotIn("EVILSECRET", result["error"])
+                self.assertIn("redacted-secret", result["output"])
 
     def test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout(self):
         """A no-tool script should not wait seconds for the idle RPC accept thread."""

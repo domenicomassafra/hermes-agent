@@ -171,6 +171,22 @@ class TestEnvLookupPreserved:
         text = "API_TOKEN=$ENV{MY_API_TOKEN}"
         assert redact_sensitive_text(text, force=True) == text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "API_TOKEN=os.getenvEVILSECRET",
+            "API_TOKEN=os.environEVILSECRET",
+            "API_TOKEN=os.environ.getEVILSECRET",
+            "API_TOKEN=process.envEVILSECRET",
+            "API_TOKEN=$ENV{MY_API_TOKEN}EVILSECRET",
+        ],
+    )
+    def test_env_lookup_prefix_lookalike_is_redacted(self, text):
+        result = redact_sensitive_text(text, force=True)
+
+        assert "EVILSECRET" not in result
+        assert result != text
+
     def test_real_env_value_still_redacted(self):
         text = "HOMEASSISTANT_TOKEN=eyJhbGciOiJIUzI1NiJ9.abc123.xyz"
         result = redact_sensitive_text(text, force=True)

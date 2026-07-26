@@ -195,7 +195,7 @@ _ENV_LOOKUP_VALUE_RE = re.compile(
     r"|os\.environ\[[^\[\]\r\n]+\]"
     r"|os\.environ\.get\([^()\r\n]*\)"
     r"|process\.env\.[A-Za-z_$][A-Za-z0-9_$]*"
-    r"|\$ENV\{[^{}\r\n]+\}"
+    r"|\$ENV\{[A-Za-z_][A-Za-z0-9_]*\}"
     r")"
 )
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
@@ -300,7 +300,11 @@ def _is_redacted_value(value: str) -> bool:
 
 def _is_env_lookup_value(value: str) -> bool:
     """Return whether the whole value is one supported environment lookup."""
-    return _ENV_LOOKUP_VALUE_RE.fullmatch(value.strip().rstrip(",;")) is not None
+    # Only statement delimiters may trail a complete lookup.  Do not use the
+    # Python AST punctuation splitter here: ``$ENV{X}`` is a supported
+    # non-Python form and its closing brace is part of the expression.
+    expression = value.strip().rstrip(",;").rstrip()
+    return _ENV_LOOKUP_VALUE_RE.fullmatch(expression) is not None
 
 
 def _is_safe_code_attribute(node: ast.Attribute) -> bool:
