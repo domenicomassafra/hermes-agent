@@ -1033,6 +1033,8 @@ class TestTerminalOutputRedaction:
         "source",
         [
             "TOKEN=TokenKind.NAME,",
+            "TOKEN=ColorEnum.RED",
+            "TOKEN=CredentialType.API",
             "TOKEN=response.usage.prompt_tokens",
             "TOKEN=Response.usage.prompt_tokens",
             "TOKEN=self.config.auth_token",

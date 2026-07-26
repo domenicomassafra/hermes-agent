@@ -265,7 +265,7 @@ _SOURCE_ATTRIBUTE_MARKERS = frozenset({
     "settings",
 })
 _SOURCE_USAGE_ROOTS = frozenset({"completion", "response", "result"})
-_PASCAL_CASE_RE = re.compile(r"[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+")
+_SOURCE_CONSTANT_ROOT_SUFFIXES = ("Kind", "Enum", "Type")
 
 
 def _split_source_value(value: str) -> tuple[str, str]:
@@ -300,7 +300,10 @@ def _is_safe_code_attribute(node: ast.Attribute) -> bool:
         return True
     return (
         len(attributes) == 1
-        and _PASCAL_CASE_RE.fullmatch(root) is not None
+        and any(
+            root.endswith(suffix) and len(root) > len(suffix)
+            for suffix in _SOURCE_CONSTANT_ROOT_SUFFIXES
+        )
         and attributes[0].isupper()
     )
 

@@ -286,6 +286,8 @@ class TestExecuteCode(unittest.TestCase):
             "DISCORD_BOT_TOKEN=AbCdEf_GhIjKl.MnOpQr_StUv",
             "DISCORD_BOT_TOKEN=abcdef.token.ghijkl",
             "DISCORD_BOT_TOKEN=ABCDEF.USAGE.GHIJKL",
+            "DISCORD_BOT_TOKEN=AbCdEf.GHIJKL",
+            "DISCORD_BOT_TOKEN=AbcDef.GHIJKL",
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -320,9 +322,11 @@ class TestExecuteCode(unittest.TestCase):
             "AbCdEf_GhIjKl.MnOpQr_StUv",
             "abcdef.token.ghijkl",
             "ABCDEF.USAGE.GHIJKL",
+            "AbCdEf.GHIJKL",
+            "AbcDef.GHIJKL",
         ):
             self.assertNotIn(secret_fragment, persisted)
-        self.assertEqual(persisted.count("redacted-secret"), 10)
+        self.assertEqual(persisted.count("redacted-secret"), 12)
 
     def test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout(self):
         """A no-tool script should not wait seconds for the idle RPC accept thread."""
