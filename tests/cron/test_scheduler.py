@@ -4456,7 +4456,131 @@ class TestDeliverResultTimeoutCancelsFuture:
             )
 
         assert result is not None
-        assert standalone.await_args.kwargs["thread_id"] == "Private"
+        assert "named Telegram topic" in result
+        assert "persisted thread_id" in result
+        standalone.assert_not_awaited()
+
+    def test_standalone_named_private_topic_uses_persisted_binding(self):
+        """CLI cron runs reuse the topic id persisted by the live adapter."""
+        from gateway.config import Platform, PlatformConfig
+
+        pconfig = PlatformConfig(
+            enabled=True,
+            extra={
+                "dm_topics": [
+                    {
+                        "chat_id": 1086028134,
+                        "topics": [
+                            {
+                                "name": "📊 Recap automatici",
+                                "thread_id": 109729,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        job = {
+            "id": "standalone-named-topic",
+            "deliver": "telegram:1086028134:📊 Recap automatici",
+        }
+
+        standalone = AsyncMock(return_value={"success": True})
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", standalone):
+            result = _deliver_result(job, "# ✅ TEST\nPersisted topic.")
+
+        assert result is None
+        assert standalone.await_args.kwargs["thread_id"] == "109729"
+
+    def test_standalone_named_private_topic_uses_explicit_root_fallback(self):
+        """An adapterless CLI run can use root DM only when the job opts in."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        pconfig.extra = {"dm_topics": []}
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        job = {
+            "id": "standalone-root-fallback",
+            "deliver": "telegram:1086028134:📊 Recap automatici",
+            "topic_fallback": "root",
+        }
+
+        standalone = AsyncMock(return_value={"success": True})
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", standalone):
+            result = _deliver_result(job, "# ✅ TEST\nRoot fallback.")
+
+        assert result is None
+        assert standalone.await_args.kwargs["thread_id"] is None
+
+    def test_standalone_named_private_topic_fails_closed_without_binding(self):
+        """A missing binding cannot become an invalid or root-DM send."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        pconfig.extra = {"dm_topics": []}
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        job = {
+            "id": "standalone-no-topic",
+            "deliver": "telegram:1086028134:📊 Recap automatici",
+        }
+
+        standalone = AsyncMock(return_value={"success": True})
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", standalone):
+            result = _deliver_result(job, "# ✅ TEST\nMust not leak.")
+
+        assert result is not None
+        assert "named Telegram topic" in result
+        assert "persisted thread_id" in result
+        standalone.assert_not_awaited()
+
+    def test_standalone_named_private_topic_does_not_match_another_chat(self):
+        """A same-named topic in another chat cannot be reused cross-chat."""
+        from gateway.config import Platform, PlatformConfig
+
+        pconfig = PlatformConfig(
+            enabled=True,
+            extra={
+                "dm_topics": [
+                    {
+                        "chat_id": 999999999,
+                        "topics": [
+                            {
+                                "name": "📊 Recap automatici",
+                                "thread_id": 109729,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        job = {
+            "id": "standalone-wrong-chat-topic",
+            "deliver": "telegram:1086028134:📊 Recap automatici",
+        }
+
+        standalone = AsyncMock(return_value={"success": True})
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", standalone):
+            result = _deliver_result(job, "# ✅ TEST\nMust stay scoped.")
+
+        assert result is not None
+        assert "persisted thread_id" in result
+        standalone.assert_not_awaited()
 
 
 class TestDeliverResultLiveAdapterUnconfirmed:

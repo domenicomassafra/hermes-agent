@@ -1529,6 +1529,54 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _resolve_persisted_telegram_dm_topic(
+    pconfig: Any,
+    chat_id: Any,
+    topic_name: Any,
+) -> Optional[str]:
+    """Return the numeric thread id persisted for a named private DM topic.
+
+    The live Telegram adapter can create a named topic and persists the result
+    in ``PlatformConfig.extra.dm_topics``.  Adapterless delivery paths (notably
+    ``hermes cron run``) cannot create or probe topics, but they can safely
+    reuse that canonical binding.  Malformed, ambiguous, or non-positive ids
+    fail closed by returning ``None``.
+    """
+    extra = getattr(pconfig, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    dm_topics = extra.get("dm_topics")
+    if not isinstance(dm_topics, list):
+        return None
+
+    wanted_chat_id = str(chat_id).strip()
+    wanted_topic_name = str(topic_name).strip()
+    for chat_binding in dm_topics:
+        if not isinstance(chat_binding, dict):
+            continue
+        if str(chat_binding.get("chat_id", "")).strip() != wanted_chat_id:
+            continue
+        topics = chat_binding.get("topics")
+        if not isinstance(topics, list):
+            continue
+        for topic_binding in topics:
+            if not isinstance(topic_binding, dict):
+                continue
+            if str(topic_binding.get("name", "")).strip() != wanted_topic_name:
+                continue
+            persisted_thread_id = topic_binding.get("thread_id")
+            if isinstance(persisted_thread_id, bool):
+                return None
+            try:
+                numeric_thread_id = int(str(persisted_thread_id).strip())
+            except (TypeError, ValueError):
+                return None
+            if numeric_thread_id <= 0:
+                return None
+            return str(numeric_thread_id)
+    return None
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -2128,6 +2176,56 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 target_errors.append(msg)
                 delivery_errors.extend(target_errors)
                 continue
+            # A named Telegram private topic is only directly sendable as a
+            # numeric ``message_thread_id``.  The live adapter resolves/creates
+            # that topic above; adapterless paths such as ``hermes cron run``
+            # must reuse the persisted binding rather than pass the human name
+            # to the Bot API (which raises ``int(<topic name>)``).  If no
+            # binding exists, root-DM delivery is allowed only by an explicit
+            # job-level opt-in; otherwise fail closed without sending.
+            from gateway.delivery import (
+                _looks_like_int,
+                looks_like_telegram_private_chat_id,
+            )
+
+            is_named_telegram_private_topic = (
+                platform == Platform.TELEGRAM
+                and thread_id is not None
+                and looks_like_telegram_private_chat_id(str(chat_id))
+                and not _looks_like_int(str(thread_id))
+            )
+            if is_named_telegram_private_topic:
+                persisted_thread_id = _resolve_persisted_telegram_dm_topic(
+                    pconfig,
+                    chat_id,
+                    thread_id,
+                )
+                if persisted_thread_id is not None:
+                    logger.info(
+                        "Job '%s': resolved named Telegram topic %r to persisted "
+                        "thread_id=%s for standalone delivery",
+                        job["id"],
+                        thread_id,
+                        persisted_thread_id,
+                    )
+                    thread_id = persisted_thread_id
+                elif str(job.get("topic_fallback") or "").strip().lower() == "root":
+                    logger.warning(
+                        "Job '%s': named Telegram topic %r has no persisted "
+                        "thread_id; using the explicitly configured root-DM fallback",
+                        job["id"],
+                        thread_id,
+                    )
+                    thread_id = None
+                else:
+                    msg = (
+                        f"named Telegram topic {thread_id!r} for chat {chat_id} "
+                        "has no persisted thread_id and no live adapter is available"
+                    )
+                    logger.warning("Job '%s': %s", job["id"], msg)
+                    target_errors.append(msg)
+                    delivery_errors.extend(target_errors)
+                    continue
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
             coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
             try:
