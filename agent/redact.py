@@ -7,6 +7,7 @@ Short tokens (< 18 chars) are fully masked. Longer tokens preserve
 the first 6 and last 4 characters for debuggability.
 """
 
+import ast
 import logging
 import os
 import re
@@ -205,8 +206,8 @@ _CFG_ANCHORED_RE = re.compile(
 )
 _CODE_CREDENTIAL_ASSIGN_RE = re.compile(
     rf"(^[ \t]*(?:export[ \t]+)?)"
-    rf"([A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)"
-    rf"([ \t]*=[ \t]*)(['\"]?)([^\s&]+?)\4(?=[\s&]|$)",
+    rf"([A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*)"
+    rf"([ \t]*=[ \t]*)([^\r\n]+)$",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -252,13 +253,10 @@ _SAFE_CODE_CREDENTIAL_VALUE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_SAFE_CODE_MEMBER_RE = re.compile(
-    r"(?:[A-Za-z_]\w*\.)+[A-Z_][A-Z0-9_]*"
+_CODE_STRING_LITERAL_RE = re.compile(
+    r"(?P<prefix>[rubf]*)(?P<quote>['\"])(?P<body>.*)(?P=quote)",
+    re.IGNORECASE,
 )
-_SAFE_CODE_CALL_RE = re.compile(
-    r"(?:await[ \t]+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^()\r\n]*\)"
-)
-_SAFE_CODE_STRING_FRAGMENT_RE = re.compile(r"[rubf]{1,2}['\"].*", re.IGNORECASE)
 _SOURCE_VALUE_TRAILING_PUNCTUATION = ",;)]}"
 
 
@@ -275,19 +273,42 @@ def _is_safe_code_credential_value(value: str) -> bool:
     but completely unkeyed opaque values remain intentionally undetectable:
     guessing from entropy would corrupt arbitrary source and tool output.
     """
-    expression = value.rstrip(",;")
-    if (
-        _SAFE_CODE_CALL_RE.fullmatch(expression)
-        or _SAFE_CODE_STRING_FRAGMENT_RE.fullmatch(expression)
+    expression = value.strip().rstrip(",;")
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except (SyntaxError, ValueError):
+        node = None
+    if isinstance(
+        node,
+        (
+            ast.Attribute,
+            ast.Await,
+            ast.Call,
+            ast.JoinedStr,
+            ast.Lambda,
+            ast.Subscript,
+        ),
     ):
         return True
-    core, _ = _split_source_value(value)
-    if not core or _ENV_LOOKUP_VALUE_RE.match(core):
+    if not expression or _ENV_LOOKUP_VALUE_RE.match(expression):
         return True
-    return (
-        _SAFE_CODE_CREDENTIAL_VALUE_RE.fullmatch(core) is not None
-        or _SAFE_CODE_MEMBER_RE.fullmatch(core) is not None
-    )
+    return _SAFE_CODE_CREDENTIAL_VALUE_RE.fullmatch(expression) is not None
+
+
+def _mask_code_credential_value(value: str) -> str:
+    """Mask one complete assignment value without breaking its syntax."""
+    stripped = value.rstrip()
+    trailing_whitespace = value[len(stripped):]
+    core, punctuation = _split_source_value(stripped)
+    literal = _CODE_STRING_LITERAL_RE.fullmatch(core)
+    if literal is None:
+        masked = _mask_token_nonreusable(core)
+    else:
+        prefix = literal.group("prefix")
+        quote = literal.group("quote")
+        marker = "<redacted-secret>" if "b" in prefix.lower() else "«redacted-secret»"
+        masked = f"{prefix}{quote}{marker}{quote}"
+    return f"{masked}{punctuation}{trailing_whitespace}"
 
 # Authorization headers — any scheme (Bearer, Basic, Token, Digest, …) plus the
 # bare-credential form, and Proxy-Authorization. The credential token is masked
@@ -706,23 +727,15 @@ def redact_sensitive_text(
     if file_read:
         code_file = True
 
-    def _redact_env(
-        m,
-        *,
-        nonreusable: bool = False,
-        preserve_safe_code_value: bool = False,
-    ):
+    def _redact_env(m):
         name, quote, value = m.group(1), m.group(2), m.group(3)
         # Programmatic env lookups reference variable *names*, not
         # secret values — masking them corrupts code snippets in
         # prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
         if _ENV_LOOKUP_VALUE_RE.match(value):
             return m.group(0)
-        if preserve_safe_code_value and _is_safe_code_credential_value(value):
-            return m.group(0)
         core, suffix = _split_source_value(value) if not quote else (value, "")
-        masker = _mask_token_nonreusable if nonreusable else _mask_token
-        return f"{name}={quote}{masker(core)}{quote}{suffix}"
+        return f"{name}={quote}{_mask_token(core)}{quote}{suffix}"
 
     # Credential-shaped assignments are structural persistence boundaries.
     # Mask the ENTIRE assigned value before vendor-prefix redaction so wrappers
@@ -731,31 +744,14 @@ def redact_sensitive_text(
     # remain byte-for-byte intact.
     if code_file and "=" in text:
         def _redact_code_assignment(m):
-            prefix, name, sep, quote, value = m.groups()
+            prefix, name, sep, value = m.groups()
             if not _is_unambiguous_credential_env_name(name):
                 return m.group(0)
             if _is_safe_code_credential_value(value):
                 return m.group(0)
-            core, suffix = _split_source_value(value) if not quote else (value, "")
-            return (
-                f"{prefix}{name}{sep}{quote}"
-                f"{_mask_token_nonreusable(core)}{quote}{suffix}"
-            )
+            return f"{prefix}{name}{sep}{_mask_code_credential_value(value)}"
 
         text = _CODE_CREDENTIAL_ASSIGN_RE.sub(_redact_code_assignment, text)
-        if "://" not in text:
-            text = _CFG_DOTTED_RE.sub(
-                lambda m: (
-                    _redact_env(
-                        m,
-                        nonreusable=True,
-                        preserve_safe_code_value=True,
-                    )
-                    if _is_unambiguous_credential_env_name(m.group(1))
-                    else m.group(0)
-                ),
-                text,
-            )
 
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):

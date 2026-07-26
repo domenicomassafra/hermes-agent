@@ -1034,6 +1034,9 @@ class TestTerminalOutputRedaction:
         [
             "TOKEN=TokenKind.NAME,",
             "TOKEN=get_token();",
+            'TOKEN=config["token"]',
+            "TOKEN=wrap(get_token())",
+            'TOKEN=lambda: "fixture"',
             "AUTH=client.get_auth(),",
             "AUTH=True;",
             "PASSWORD=placeholder",
