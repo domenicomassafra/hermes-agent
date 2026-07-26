@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.config import set_config_value, config_command
+from hermes_cli.config import (
+    config_command,
+    get_config_value,
+    set_config_value,
+    unset_config_value,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -402,6 +407,69 @@ class TestListNavigation:
         assert "dm_topics[0]" not in extra
         assert "topics[0]" not in extra
 
+    def test_bracketed_path_is_shared_by_set_get_unset(
+        self, _isolated_hermes_home, capsys
+    ):
+        self._write_config(_isolated_hermes_home, (
+            "platforms:\n"
+            "  telegram:\n"
+            "    extra:\n"
+            "      dm_topics:\n"
+            "      - chat_id: 123\n"
+            "        topics:\n"
+            "        - name: Old name\n"
+            "          thread_id: 456\n"
+        ))
+        path = "platforms.telegram.extra.dm_topics[0].topics[0].name"
+
+        set_config_value(path, "New name")
+        capsys.readouterr()
+        get_config_value(path)
+        assert capsys.readouterr().out.strip() == "New name"
+        unset_config_value(path)
+
+        import yaml
+        reloaded = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert "name" not in reloaded["platforms"]["telegram"]["extra"]["dm_topics"][0]["topics"][0]
+        assert reloaded["platforms"]["telegram"]["extra"]["dm_topics"][0]["topics"][0]["thread_id"] == 456
+
+    def test_bracketed_path_is_canonical_for_managed_check(
+        self, _isolated_hermes_home
+    ):
+        path = "custom_providers[0].api_key"
+        with patch("hermes_cli.managed_scope.is_key_managed", return_value=False) as check:
+            with pytest.raises(SystemExit):
+                set_config_value(path, "new-secret")
+
+        check.assert_called_once_with("custom_providers.0.api_key")
+
+    def test_bracketed_secret_leaf_is_masked_in_set_echo(
+        self, _isolated_hermes_home, capsys
+    ):
+        self._write_config(_isolated_hermes_home, (
+            "custom_providers:\n"
+            "- name: provider-a\n"
+            "  api_key: old\n"
+        ))
+        secret = "opaque-new-provider-credential-material-12345"
+
+        set_config_value("custom_providers[0].api_key", secret)
+
+        assert secret not in capsys.readouterr().out
+
+    def test_bracketed_path_drives_coercion(self, _isolated_hermes_home):
+        self._write_config(_isolated_hermes_home, (
+            "custom_providers:\n"
+            "- name: provider-a\n"
+            "  enabled: false\n"
+        ))
+
+        set_config_value("custom_providers[0].enabled", "true")
+
+        import yaml
+        reloaded = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert reloaded["custom_providers"][0]["enabled"] is True
+
     @pytest.mark.parametrize(
         "key",
         [
@@ -428,6 +496,16 @@ class TestListNavigation:
         assert exc.value.code == 1
         assert _read_config(_isolated_hermes_home) == original
         assert "invalid config key path" in capsys.readouterr().err.lower()
+
+    def test_malformed_path_error_does_not_echo_attacker_controlled_text(
+        self, _isolated_hermes_home, capsys
+    ):
+        secret = "opaque-secret-in-malformed-path-12345"
+
+        with pytest.raises(SystemExit):
+            set_config_value(f"platforms.telegram[{secret}].enabled", "true")
+
+        assert secret not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +768,14 @@ class TestValidateConfigKey:
         from hermes_cli.config import _validate_config_key
         is_known, suggestion = _validate_config_key("agent._max_turns")
         assert not is_known, "Sub-key typo under a known top-level key must still be flagged"
+
+    def test_bracket_index_uses_same_parsed_validation_path(self):
+        from hermes_cli.config import _validate_config_key
+
+        is_known, suggestion = _validate_config_key("custom_providers[0].api_key")
+
+        assert is_known
+        assert suggestion is None
 
 
 # ---------------------------------------------------------------------------

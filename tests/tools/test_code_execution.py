@@ -254,6 +254,21 @@ class TestExecuteCode(unittest.TestCase):
         self.assertNotIn(secret, result["output"])
         self.assertIn("DISCORD_BOT_TOKEN=«redacted-secret»", result["output"])
 
+    def test_structured_credential_outputs_are_redacted(self):
+        """JSON, YAML, and lowercase assignments share the output boundary."""
+        probes = (
+            '{"telegram_bot_token": "opaque-json-credential-material-12345"}',
+            "telegram_bot_token: opaque-yaml-credential-material-12345",
+            "telegram_bot_token=opaque-lowercase-credential-material-12345",
+        )
+
+        for probe in probes:
+            with self.subTest(probe=probe):
+                result = self._run(f"print({probe!r})")
+                self.assertEqual(result["status"], "success")
+                self.assertNotIn("credential-material", result["output"])
+                self.assertIn("«redacted-secret»", result["output"])
+
     def test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout(self):
         """A no-tool script should not wait seconds for the idle RPC accept thread."""
         start = time.monotonic()

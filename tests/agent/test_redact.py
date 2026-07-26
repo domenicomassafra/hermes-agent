@@ -1001,6 +1001,59 @@ class TestTerminalOutputRedaction:
         assert "«redacted-secret»" in red
         assert "MAX_TOKENS=100" in red
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            '{"telegram_bot_token": "opaque-json-credential-material-12345"}',
+            "telegram_bot_token: opaque-yaml-credential-material-12345",
+            "telegram_bot_token=opaque-lowercase-credential-material-12345",
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["code", "file"])
+    def test_structured_credentials_are_masked_at_persistence_boundaries(
+        self, text, mode
+    ):
+        kwargs = {"code_file": True} if mode == "code" else {"file_read": True}
+
+        red = redact_sensitive_text(text, force=True, **kwargs)
+
+        assert "credential-material" not in red
+        assert "«redacted-secret»" in red
+
+    def test_credential_assignment_masks_entire_vendor_shaped_value(self):
+        text = "DISCORD_BOT_TOKEN=wrapper-sk-proj-abcdefghijklmnop-secret-tail"
+
+        red = redact_sensitive_text(text, code_file=True, force=True)
+
+        assert red == "DISCORD_BOT_TOKEN=«redacted-secret»"
+        assert "wrapper" not in red
+        assert "secret-tail" not in red
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "TOKEN=TokenKind.NAME,",
+            "AUTH=True;",
+            "PASSWORD=placeholder",
+            "MAX_TOKENS=100",
+            '{"token_count": "pending"}',
+        ],
+    )
+    def test_source_constants_keep_syntax_and_punctuation(self, source):
+        assert redact_sensitive_text(source, code_file=True, force=True) == source
+
+    def test_unkeyed_opaque_text_has_an_explicit_non_detection_boundary(self):
+        """Unknown opaque blobs need structural context or a known prefix.
+
+        Redacting arbitrary high-entropy-looking text would corrupt normal
+        source and tool output.  Completely unkeyed values therefore pass
+        through unless another deterministic pattern (known prefix, JWT,
+        private key, connection string, etc.) identifies them.
+        """
+        opaque = "opaque-material-with-no-key-or-known-provider-prefix-12345"
+
+        assert redact_sensitive_text(opaque, code_file=True, force=True) == opaque
+
     def test_code_env_lookup_is_not_mistaken_for_a_credential_value(self):
         source = "DISCORD_BOT_TOKEN=os.getenv('DISCORD_BOT_TOKEN')"
 

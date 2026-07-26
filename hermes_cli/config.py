@@ -4919,38 +4919,54 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
 
 
 _BRACKET_INDEX_RE = re.compile(r"\[(\d+)\]")
+_NestedPath = tuple[Any, ...]
 
 
-def _parse_nested_path(dotted_key: str) -> List[Any]:
+def _parse_nested_path(dotted_key: str) -> _NestedPath:
     """Parse dotted config paths, including safe ``name[0]`` list indices.
 
     Brackets are syntax, never literal mapping-key characters.  Any malformed
     or non-numeric bracket expression is rejected before the caller mutates or
     persists the config.
     """
+    if not isinstance(dotted_key, str) or not dotted_key:
+        raise ValueError("config path must be a non-empty string")
+
     parts: List[Any] = []
     for segment in dotted_key.split("."):
+        if not segment:
+            raise ValueError("config path contains an empty segment")
         if "[" not in segment and "]" not in segment:
             parts.append(segment)
             continue
 
         bracket_at = segment.find("[")
         if bracket_at <= 0 or "]" in segment[:bracket_at]:
-            raise ValueError(f"malformed bracket index in segment {segment!r}")
+            raise ValueError("config path contains a malformed bracket index")
 
         parts.append(segment[:bracket_at])
         position = bracket_at
         while position < len(segment):
             match = _BRACKET_INDEX_RE.match(segment, position)
             if match is None:
-                raise ValueError(f"malformed bracket index in segment {segment!r}")
+                raise ValueError("config path contains a malformed bracket index")
             parts.append(int(match.group(1)))
             position = match.end()
 
-    return parts
+    return tuple(parts)
 
 
-def _set_nested(config, dotted_key: str, value):
+def _nested_path(path: str | _NestedPath) -> _NestedPath:
+    """Return the single parsed representation used by every config operation."""
+    return _parse_nested_path(path) if isinstance(path, str) else path
+
+
+def _format_nested_path(path: _NestedPath) -> str:
+    """Render a parsed path to the canonical dotted form used by policy layers."""
+    return ".".join(str(part) for part in path)
+
+
+def _set_nested(config, dotted_key: str | _NestedPath, value):
     """Set a value at an arbitrarily nested dotted key path.
 
     Supports both dict and list navigation:
@@ -4973,7 +4989,7 @@ def _set_nested(config, dotted_key: str, value):
     destroying list-typed config like ``custom_providers`` whenever a
     caller used an indexed path.
     """
-    parts = _parse_nested_path(dotted_key)
+    parts = _nested_path(dotted_key)
     current = config
     for part in parts[:-1]:
         if isinstance(current, list):
@@ -4983,33 +4999,24 @@ def _set_nested(config, dotted_key: str, value):
                 try:
                     idx = int(part)
                 except (TypeError, ValueError):
-                    raise TypeError(
-                        f"Cannot navigate into list at key {dotted_key!r}: "
-                        f"segment {part!r} is not a numeric index"
-                    )
+                    raise TypeError("list path segment is not a numeric index")
             current = current[idx]
         elif isinstance(current, dict):
             if isinstance(part, int):
-                raise TypeError(
-                    f"Cannot index mapping at key {dotted_key!r} with list index {part}"
-                )
+                raise TypeError("bracket index cannot address a mapping")
             existing = current.get(part)
             # Preserve dicts and lists; replace missing/scalar with a fresh dict.
             if part not in current or not isinstance(existing, (dict, list)):
                 current[part] = {}
             current = current[part]
         else:
-            raise TypeError(
-                f"Cannot navigate into {type(current).__name__} at key {dotted_key!r}"
-            )
+            raise TypeError(f"cannot navigate through {type(current).__name__}")
     last = parts[-1]
     if isinstance(current, list):
         current[int(last)] = value
     else:
         if isinstance(last, int):
-            raise TypeError(
-                f"Cannot index mapping at key {dotted_key!r} with list index {last}"
-            )
+            raise TypeError("bracket index cannot address a mapping")
         current[last] = value
 
 
@@ -5043,16 +5050,18 @@ def clear_model_endpoint_credentials(
 _MISSING = object()
 
 
-def _get_nested(config, dotted_key: str):
+def _get_nested(config, dotted_key: str | _NestedPath):
     """Return a dotted-path value from nested dict/list config data."""
     current = config
-    for part in dotted_key.split("."):
+    for part in _nested_path(dotted_key):
         if isinstance(current, list):
             try:
                 current = current[int(part)]
             except (TypeError, ValueError, IndexError):
                 return _MISSING
         elif isinstance(current, dict):
+            if isinstance(part, int):
+                return _MISSING
             if part not in current:
                 return _MISSING
             current = current[part]
@@ -5061,9 +5070,9 @@ def _get_nested(config, dotted_key: str):
     return current
 
 
-def _unset_nested(config, dotted_key: str) -> bool:
+def _unset_nested(config, dotted_key: str | _NestedPath) -> bool:
     """Remove a dotted-path value from nested dict/list config data."""
-    parts = dotted_key.split(".")
+    parts = _nested_path(dotted_key)
     if not parts:
         return False
 
@@ -5077,6 +5086,8 @@ def _unset_nested(config, dotted_key: str) -> bool:
             except (TypeError, ValueError, IndexError):
                 return False
         elif isinstance(current, dict):
+            if isinstance(part, int):
+                return False
             if part not in current:
                 return False
             current = current[part]
@@ -5092,6 +5103,8 @@ def _unset_nested(config, dotted_key: str) -> bool:
         except (TypeError, ValueError, IndexError):
             return False
     elif isinstance(current, dict):
+        if isinstance(last, int):
+            return False
         if last not in current:
             return False
         del current[last]
@@ -8810,15 +8823,21 @@ def edit_config():
     subprocess.run([editor, str(config_path)])
 
 
-def _default_value_for_key(dotted_key: str):
+def _default_value_for_key(dotted_key: str | _NestedPath):
     """Return the leaf value declared for *dotted_key* in ``DEFAULT_CONFIG``.
 
     Unknown keys and non-leaf paths return ``None`` so they retain the legacy
     best-effort coercion used by ``config set``.
     """
     node = DEFAULT_CONFIG
-    for part in dotted_key.split("."):
-        if not isinstance(node, dict) or part not in node:
+    for part in _nested_path(dotted_key):
+        if isinstance(node, list):
+            try:
+                node = node[int(part)]
+            except (TypeError, ValueError, IndexError):
+                return None
+            continue
+        if not isinstance(node, dict) or isinstance(part, int) or part not in node:
             return None
         node = node[part]
     return node if not isinstance(node, dict) else None
@@ -8902,7 +8921,7 @@ def _suggest_closest_key(key: str, candidates: set[str], cutoff: float = 0.6) ->
     return matches[0] if matches else None
 
 
-def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
+def _validate_config_key(key: str | _NestedPath) -> tuple[bool, Optional[str]]:
     """Validate a dotted config-key path against the known schema.
 
     Returns ``(is_known, suggested_alternative_or_None)``.  Known keys
@@ -8920,10 +8939,12 @@ def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
     ``discord.gateway_restart_notification`` (platform configs live at the
     top level, not under a ``platforms`` namespace).
     """
-    if not key:
+    try:
+        segments = _nested_path(key)
+    except ValueError:
         return False, None
-
-    segments = key.split(".")
+    if not segments or not isinstance(segments[0], str):
+        return False, None
     top = segments[0]
 
     # ── Underscore-prefixed keys are internal/test markers ───────────
@@ -8951,7 +8972,7 @@ def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
     if top not in known:
         suggestion = _suggest_closest_key(top, known)
         if suggestion is not None:
-            rest = ".".join(segments[1:])
+            rest = _format_nested_path(segments[1:])
             suggested_full = f"{suggestion}.{rest}" if rest else suggestion
             return False, suggested_full
 
@@ -8975,22 +8996,33 @@ def _validate_config_key(key: str) -> tuple[bool, Optional[str]]:
         # ``gateway.platforms.<name>.<field>`` (and any other nested
         # ``platforms`` container) — the segment after ``platforms`` is a
         # user-supplied platform name, so accept everything below it.
-        if seg in _PLATFORM_CONTAINER_KEYS:
+        if isinstance(seg, str) and seg in _PLATFORM_CONTAINER_KEYS:
             return True, None
+        if isinstance(node, list):
+            try:
+                node = node[int(seg)]
+            except (TypeError, ValueError, IndexError):
+                return False, None
+            consumed.append(str(seg))
+            continue
         if not isinstance(node, dict):
             # We hit a scalar leaf before consuming the user's full path —
             # they're trying to set ``foo.bar`` where ``foo`` is a string.
             # Accept it (set_config_value's coercion will replace the
             # leaf with a dict, matching pre-existing behavior).
             return True, None
-        if seg not in node:
+        if isinstance(seg, int) or seg not in node:
             # Suggest the closest sibling at this depth.
-            sibling_suggestion = _suggest_closest_key(seg, set(node.keys()))
+            sibling_suggestion = (
+                _suggest_closest_key(seg, set(node.keys()))
+                if isinstance(seg, str)
+                else None
+            )
             if sibling_suggestion is not None:
                 fixed_path = ".".join(consumed + [sibling_suggestion])
                 return False, fixed_path
             return False, None
-        consumed.append(seg)
+        consumed.append(str(seg))
         node = node[seg]
 
     # Walked the entire user-supplied path without hitting an unknown
@@ -9011,6 +9043,13 @@ def set_config_value(key: str, value: str, force: bool = False):
     if is_managed():
         managed_error("set configuration values")
         return
+    try:
+        key_path = _parse_nested_path(key)
+    except ValueError as exc:
+        print(f"Invalid config key path: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    key = _format_nested_path(key_path)
+
     # Managed scope guard (D2): a key pinned by the managed layer cannot be set by
     # the user — the next load would override it anyway. Hard-reject and name the
     # source. Distinct from is_managed() above (the package-manager write-lock).
@@ -9044,7 +9083,7 @@ def set_config_value(key: str, value: str, force: bool = False):
     # bare success and left the user debugging behavior that never changed.
     # Warn after the write so the user gets immediate feedback plus a
     # "did you mean" hint, without blocking legitimate unknown keys.
-    is_known, suggestion = _validate_config_key(key)
+    is_known, suggestion = _validate_config_key(key_path)
 
     # Otherwise it goes to config.yaml
     # Read the raw user config (not merged with defaults) to avoid
@@ -9068,7 +9107,7 @@ def set_config_value(key: str, value: str, force: bool = False):
     # such as approvals.mode="off" must not become YAML booleans.  Unknown keys
     # retain the historical best-effort coercion behavior.
     coerced_value: Any = value
-    if not isinstance(_default_value_for_key(key), str):
+    if not isinstance(_default_value_for_key(key_path), str):
         if value.lower() in {'true', 'yes', 'on'}:
             coerced_value = True
         elif value.lower() in {'false', 'no', 'off'}:
@@ -9080,9 +9119,9 @@ def set_config_value(key: str, value: str, force: bool = False):
 
     value = coerced_value
     try:
-        _set_nested(user_config, key, value)
+        _set_nested(user_config, key_path, value)
     except (IndexError, KeyError, TypeError, ValueError) as exc:
-        print(f"Invalid config key path {key!r}: {exc}", file=sys.stderr)
+        print(f"Invalid config key path: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     # Normalize the api_base → base_url alias at set-time too (issue #8919),
     # so a fresh `hermes config set model.api_base ...` lands on the canonical
@@ -9092,6 +9131,7 @@ def set_config_value(key: str, value: str, force: bool = False):
     if _alias_norm in ("model.api_base", "api_base"):
         user_config = _normalize_root_model_keys(user_config)
         key = "model.base_url"
+        key_path = _parse_nested_path(key)
         print("  (note: 'api_base' is an alias — saved as model.base_url)")
     # Write only user config back (not the full merged defaults)
     ensure_hermes_home()
@@ -9121,7 +9161,7 @@ def set_config_value(key: str, value: str, force: bool = False):
     # — e.g. `hermes config set model.api_key cfut_...` routes to config.yaml
     # (lowercase, so it misses the .env api_keys list above) and would otherwise
     # print the raw secret to the terminal.
-    _leaf_key = key.rsplit(".", 1)[-1].lower()
+    _leaf_key = str(key_path[-1]).lower()
     if _leaf_key in _SECRET_CONFIG_KEYS and isinstance(value, str) and value:
         from agent.redact import mask_secret
         _display_value = mask_secret(value)
@@ -9149,11 +9189,18 @@ def set_config_value(key: str, value: str, force: bool = False):
 
 def get_config_value(key: str, *, as_json: bool = False):
     """Print a resolved configuration value."""
+    try:
+        key_path = _parse_nested_path(key)
+    except ValueError as exc:
+        print(f"Invalid config key path: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    key = _format_nested_path(key_path)
+
     if _is_env_config_key(key):
         env_value = get_env_value(key.upper())
         value = _MISSING if env_value is None else env_value
     else:
-        value = _get_nested(load_config(), key)
+        value = _get_nested(load_config(), key_path)
 
     if value is _MISSING:
         print(f"Config key not set: {key}", file=sys.stderr)
@@ -9167,6 +9214,13 @@ def unset_config_value(key: str):
     if is_managed():
         managed_error("unset configuration values")
         return
+    try:
+        key_path = _parse_nested_path(key)
+    except ValueError as exc:
+        print(f"Invalid config key path: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    key = _format_nested_path(key_path)
+
     # Managed scope guard: a key pinned by the managed layer cannot be unset by
     # the user — the next load would reinstate it anyway (mirrors set_config_value).
     from hermes_cli import managed_scope
@@ -9203,7 +9257,7 @@ def unset_config_value(key: str):
         except Exception:
             user_config = {}
 
-    removed = _unset_nested(user_config, key)
+    removed = _unset_nested(user_config, key_path)
 
     # Keep .env in sync for keys that terminal_tool reads directly from env vars.
     env_var = terminal_config_env_var_for_key(key)

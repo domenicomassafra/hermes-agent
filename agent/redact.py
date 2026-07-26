@@ -131,18 +131,37 @@ def _is_unambiguous_credential_env_name(name: str) -> bool:
     assignment, while counters such as ``MAX_TOKENS`` and ``TOKEN_COUNT`` are
     not.  ``API_KEY`` is recognized as the conventional two-part spelling.
     """
-    parts = name.upper().split("_")
-    if parts[-1] in {
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "PASSWD",
-        "CREDENTIAL",
-        "AUTH",
-        "APIKEY",
+    normalized = name.strip("\"'").lower()
+    if normalized in {
+        "secret_value",
+        "raw_secret",
+        "secret_input",
+        "key_material",
+        "client_secret",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "auth_token",
+        "private_key",
+        "authorization",
+        "bearer",
+        "jwt",
     }:
         return True
-    return len(parts) >= 2 and parts[-2:] == ["API", "KEY"]
+    parts = [part for part in re.split(r"[_.\- ]+", normalized) if part]
+    if not parts:
+        return False
+    if parts[-1] in {
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "credential",
+        "auth",
+        "apikey",
+    }:
+        return True
+    return len(parts) >= 2 and parts[-2:] == ["api", "key"]
 
 
 # Lowercase / dotted / hyphenated config keys from config files
@@ -200,11 +219,54 @@ _YAML_ASSIGN_RE = re.compile(
 )
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
-_JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
+_JSON_KEY_NAMES = (
+    r"(?:"
+    r"[A-Za-z0-9_.\-]*(?:api_?[Kk]ey|token|secret|password|passwd|credential)"
+    r"[A-Za-z0-9_.\-]*"
+    r"|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret"
+    r"|secret_input|key_material"
+    r")"
+)
 _JSON_FIELD_RE = re.compile(
     rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"',
     re.IGNORECASE,
 )
+
+_SAFE_CODE_CREDENTIAL_VALUE_RE = re.compile(
+    r"(?:"
+    r"true|false|none|null|nil|yes|no|on|off|"
+    r"placeholder|example|dummy|changeme|not[-_ ]?set|"
+    r"\*+|<[^>\r\n]*>|«redacted[^»]*»|"
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+    r")",
+    re.IGNORECASE,
+)
+_SAFE_CODE_MEMBER_RE = re.compile(
+    r"(?:[A-Za-z_]\w*\.)+[A-Z_][A-Z0-9_]*"
+)
+_SOURCE_VALUE_TRAILING_PUNCTUATION = ",;)]}"
+
+
+def _split_source_value(value: str) -> tuple[str, str]:
+    """Separate syntax punctuation from an unquoted assignment value."""
+    core = value.rstrip(_SOURCE_VALUE_TRAILING_PUNCTUATION)
+    return core, value[len(core):]
+
+
+def _is_safe_code_credential_value(value: str) -> bool:
+    """Return whether a credential-named source value is clearly non-secret.
+
+    Persistence boundaries can safely redact structurally keyed credentials,
+    but completely unkeyed opaque values remain intentionally undetectable:
+    guessing from entropy would corrupt arbitrary source and tool output.
+    """
+    core, _ = _split_source_value(value)
+    if not core or _ENV_LOOKUP_VALUE_RE.match(core):
+        return True
+    return (
+        _SAFE_CODE_CREDENTIAL_VALUE_RE.fullmatch(core) is not None
+        or _SAFE_CODE_MEMBER_RE.fullmatch(core) is not None
+    )
 
 # Authorization headers — any scheme (Bearer, Basic, Token, Digest, …) plus the
 # bare-credential form, and Proxy-Authorization. The credential token is masked
@@ -623,31 +685,67 @@ def redact_sensitive_text(
     if file_read:
         code_file = True
 
-    def _redact_env(m, *, nonreusable: bool = False):
+    def _redact_env(
+        m,
+        *,
+        nonreusable: bool = False,
+        preserve_safe_code_value: bool = False,
+    ):
         name, quote, value = m.group(1), m.group(2), m.group(3)
         # Programmatic env lookups reference variable *names*, not
         # secret values — masking them corrupts code snippets in
         # prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
         if _ENV_LOOKUP_VALUE_RE.match(value):
             return m.group(0)
+        if preserve_safe_code_value and _is_safe_code_credential_value(value):
+            return m.group(0)
+        core, suffix = _split_source_value(value) if not quote else (value, "")
         masker = _mask_token_nonreusable if nonreusable else _mask_token
-        return f"{name}={quote}{masker(value)}{quote}"
+        return f"{name}={quote}{masker(core)}{quote}{suffix}"
 
-    # Preserve the established prefix-mask output for known vendor tokens by
-    # letting the prefix pass below handle them.  This narrow pre-pass exists
-    # for opaque values that no vendor-pattern redactor can recognize.
+    # Credential-shaped assignments are structural persistence boundaries.
+    # Mask the ENTIRE assigned value before vendor-prefix redaction so wrappers
+    # such as ``TOKEN=prefix-sk-...-tail`` cannot leak everything around the
+    # recognized substring.  Clearly non-secret source expressions/literals
+    # remain byte-for-byte intact.
     if code_file and "=" in text:
         text = _ENV_ASSIGN_RE.sub(
             lambda m: (
-                _redact_env(m, nonreusable=True)
-                if (
-                    _is_unambiguous_credential_env_name(m.group(1))
-                    and _PREFIX_RE.search(m.group(3)) is None
+                _redact_env(
+                    m,
+                    nonreusable=True,
+                    preserve_safe_code_value=True,
                 )
+                if _is_unambiguous_credential_env_name(m.group(1))
                 else m.group(0)
             ),
             text,
         )
+        if "://" not in text:
+            text = _CFG_DOTTED_RE.sub(
+                lambda m: (
+                    _redact_env(
+                        m,
+                        nonreusable=True,
+                        preserve_safe_code_value=True,
+                    )
+                    if _is_unambiguous_credential_env_name(m.group(1))
+                    else m.group(0)
+                ),
+                text,
+            )
+            text = _CFG_ANCHORED_RE.sub(
+                lambda m: (
+                    _redact_env(
+                        m,
+                        nonreusable=True,
+                        preserve_safe_code_value=True,
+                    )
+                    if _is_unambiguous_credential_env_name(m.group(1))
+                    else m.group(0)
+                ),
+                text,
+            )
 
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
@@ -669,32 +767,39 @@ def redact_sensitive_text(
                 text = _CFG_DOTTED_RE.sub(_redact_env, text)
                 text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 
-    if not code_file:
-        # JSON fields: "apiKey": "***"  (skip for code files — false positives)
-        if ":" in text and '"' in text:
-            def _redact_json(m):
-                key, value = m.group(1), m.group(2)
-                # Same programmatic-env-lookup exception as _redact_env above
-                # (issue #2852): "apiKey": "os.getenv('X')" is a code snippet,
-                # not a leaked secret value.
-                if _ENV_LOOKUP_VALUE_RE.match(value):
-                    return m.group(0)
-                return f'{key}: "{_mask_token(value)}"'
-            text = _JSON_FIELD_RE.sub(_redact_json, text)
+    # Structurally credential-bearing JSON/YAML is also a persistence boundary
+    # in execute_code/file reads.  The safe-source predicate prevents fixtures
+    # and constants from being rewritten while real keyed values are replaced
+    # with a non-reusable sentinel.
+    if ":" in text and '"' in text:
+        def _redact_json(m):
+            key, value = m.group(1), m.group(2)
+            if not _is_unambiguous_credential_env_name(key):
+                return m.group(0)
+            if _ENV_LOOKUP_VALUE_RE.match(value):
+                return m.group(0)
+            if code_file and _is_safe_code_credential_value(value):
+                return m.group(0)
+            masker = _mask_token_nonreusable if code_file else _mask_token
+            return f'{key}: "{masker(value)}"'
+        text = _JSON_FIELD_RE.sub(_redact_json, text)
 
-        # Unquoted YAML / colon config: password: ***  (after JSON so quoted
-        # values are handled there; the lookahead in _YAML_ASSIGN_RE skips
-        # quotes). Skip URLs — web-URL query params pass through by design.
-        if ":" in text and "://" not in text:
-            def _redact_yaml(m):
-                key, sep, value = m.group(1), m.group(2), m.group(3)
-                # Same programmatic-env-lookup exception as _redact_env above
-                # (issue #2852): api_key: os.getenv('X') is a code snippet,
-                # not a leaked secret value.
-                if _ENV_LOOKUP_VALUE_RE.match(value):
-                    return m.group(0)
-                return f"{key}{sep}{_mask_token(value)}"
-            text = _YAML_ASSIGN_RE.sub(_redact_yaml, text)
+    # Unquoted YAML / colon config: password: ***  (after JSON so quoted
+    # values are handled there; the lookahead in _YAML_ASSIGN_RE skips
+    # quotes). Skip URLs — web-URL query params pass through by design.
+    if ":" in text and "://" not in text:
+        def _redact_yaml(m):
+            key, sep, value = m.group(1), m.group(2), m.group(3)
+            if not _is_unambiguous_credential_env_name(key):
+                return m.group(0)
+            if _ENV_LOOKUP_VALUE_RE.match(value):
+                return m.group(0)
+            if code_file and _is_safe_code_credential_value(value):
+                return m.group(0)
+            core, suffix = _split_source_value(value) if code_file else (value, "")
+            masker = _mask_token_nonreusable if code_file else _mask_token
+            return f"{key}{sep}{masker(core)}{suffix}"
+        text = _YAML_ASSIGN_RE.sub(_redact_yaml, text)
 
     # Authorization headers — _AUTH_HEADER_RE matches any scheme after
     # "[Proxy-]Authorization:" case-insensitively, so "uthorization" is the
