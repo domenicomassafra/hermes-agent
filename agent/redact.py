@@ -203,6 +203,12 @@ _CFG_ANCHORED_RE = re.compile(
     rf"(^[ \t]*(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
     re.IGNORECASE | re.MULTILINE,
 )
+_CODE_CREDENTIAL_ASSIGN_RE = re.compile(
+    rf"(^[ \t]*(?:export[ \t]+)?)"
+    rf"([A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)"
+    rf"([ \t]*=[ \t]*)(['\"]?)([^\s&]+?)\4(?=[\s&]|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Unquoted YAML / colon config (e.g. ``password: secret``,
 # ``spring.datasource.password: hunter2``). The secret keyword must be part of
@@ -215,6 +221,11 @@ _CFG_ANCHORED_RE = re.compile(
 _YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
 _YAML_ASSIGN_RE = re.compile(
     rf"(^[ \t]*[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*)(:[ \t]*)(?!['\"])([^\s&]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_QUOTED_YAML_ASSIGN_RE = re.compile(
+    rf"(^[ \t]*[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*)"
+    rf"(:[ \t]*)(['\"])([^'\"\r\n]+)\3",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -235,7 +246,7 @@ _JSON_FIELD_RE = re.compile(
 _SAFE_CODE_CREDENTIAL_VALUE_RE = re.compile(
     r"(?:"
     r"true|false|none|null|nil|yes|no|on|off|"
-    r"placeholder|example|dummy|changeme|not[-_ ]?set|"
+    r"placeholder|example|dummy|test|changeme|not[-_ ]?set|"
     r"\*+|<[^>\r\n]*>|«redacted[^»]*»|"
     r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
     r")",
@@ -244,6 +255,10 @@ _SAFE_CODE_CREDENTIAL_VALUE_RE = re.compile(
 _SAFE_CODE_MEMBER_RE = re.compile(
     r"(?:[A-Za-z_]\w*\.)+[A-Z_][A-Z0-9_]*"
 )
+_SAFE_CODE_CALL_RE = re.compile(
+    r"(?:await[ \t]+)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\([^()\r\n]*\)"
+)
+_SAFE_CODE_STRING_FRAGMENT_RE = re.compile(r"[rubf]{1,2}['\"].*", re.IGNORECASE)
 _SOURCE_VALUE_TRAILING_PUNCTUATION = ",;)]}"
 
 
@@ -260,6 +275,12 @@ def _is_safe_code_credential_value(value: str) -> bool:
     but completely unkeyed opaque values remain intentionally undetectable:
     guessing from entropy would corrupt arbitrary source and tool output.
     """
+    expression = value.rstrip(",;")
+    if (
+        _SAFE_CODE_CALL_RE.fullmatch(expression)
+        or _SAFE_CODE_STRING_FRAGMENT_RE.fullmatch(expression)
+    ):
+        return True
     core, _ = _split_source_value(value)
     if not core or _ENV_LOOKUP_VALUE_RE.match(core):
         return True
@@ -709,32 +730,21 @@ def redact_sensitive_text(
     # recognized substring.  Clearly non-secret source expressions/literals
     # remain byte-for-byte intact.
     if code_file and "=" in text:
-        text = _ENV_ASSIGN_RE.sub(
-            lambda m: (
-                _redact_env(
-                    m,
-                    nonreusable=True,
-                    preserve_safe_code_value=True,
-                )
-                if _is_unambiguous_credential_env_name(m.group(1))
-                else m.group(0)
-            ),
-            text,
-        )
+        def _redact_code_assignment(m):
+            prefix, name, sep, quote, value = m.groups()
+            if not _is_unambiguous_credential_env_name(name):
+                return m.group(0)
+            if _is_safe_code_credential_value(value):
+                return m.group(0)
+            core, suffix = _split_source_value(value) if not quote else (value, "")
+            return (
+                f"{prefix}{name}{sep}{quote}"
+                f"{_mask_token_nonreusable(core)}{quote}{suffix}"
+            )
+
+        text = _CODE_CREDENTIAL_ASSIGN_RE.sub(_redact_code_assignment, text)
         if "://" not in text:
             text = _CFG_DOTTED_RE.sub(
-                lambda m: (
-                    _redact_env(
-                        m,
-                        nonreusable=True,
-                        preserve_safe_code_value=True,
-                    )
-                    if _is_unambiguous_credential_env_name(m.group(1))
-                    else m.group(0)
-                ),
-                text,
-            )
-            text = _CFG_ANCHORED_RE.sub(
                 lambda m: (
                     _redact_env(
                         m,
@@ -788,6 +798,19 @@ def redact_sensitive_text(
     # values are handled there; the lookahead in _YAML_ASSIGN_RE skips
     # quotes). Skip URLs — web-URL query params pass through by design.
     if ":" in text and "://" not in text:
+        def _redact_quoted_yaml(m):
+            key, sep, quote, value = m.group(1), m.group(2), m.group(3), m.group(4)
+            if not _is_unambiguous_credential_env_name(key):
+                return m.group(0)
+            if _ENV_LOOKUP_VALUE_RE.match(value):
+                return m.group(0)
+            if code_file and _is_safe_code_credential_value(value):
+                return m.group(0)
+            masker = _mask_token_nonreusable if code_file else _mask_token
+            return f"{key}{sep}{quote}{masker(value)}{quote}"
+
+        text = _QUOTED_YAML_ASSIGN_RE.sub(_redact_quoted_yaml, text)
+
         def _redact_yaml(m):
             key, sep, value = m.group(1), m.group(2), m.group(3)
             if not _is_unambiguous_credential_env_name(key):

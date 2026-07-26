@@ -1033,9 +1033,13 @@ class TestTerminalOutputRedaction:
         "source",
         [
             "TOKEN=TokenKind.NAME,",
+            "TOKEN=get_token();",
+            "AUTH=client.get_auth(),",
             "AUTH=True;",
             "PASSWORD=placeholder",
             "MAX_TOKENS=100",
+            '{"token":"test"}',
+            'telegram_bot_token: "test"',
             '{"token_count": "pending"}',
         ],
     )

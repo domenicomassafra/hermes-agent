@@ -17,7 +17,9 @@ import pytest
 
 import json
 import os
+from pathlib import Path
 import socket
+import tempfile
 import time
 
 os.environ["TERMINAL_ENV"] = "local"
@@ -268,6 +270,40 @@ class TestExecuteCode(unittest.TestCase):
                 self.assertEqual(result["status"], "success")
                 self.assertNotIn("credential-material", result["output"])
                 self.assertIn("«redacted-secret»", result["output"])
+
+    def test_structured_credentials_are_redacted_before_sqlite_persistence(self):
+        """Real execute_code output must reach SessionDB without the secret."""
+        from hermes_state import SessionDB
+
+        probes = (
+            "telegram_bot_token = opaque-spaced-credential-material-12345",
+            'telegram_bot_token: "opaque-quoted-yaml-material-12345"',
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = SessionDB(db_path=Path(temp_dir) / "state.db")
+            try:
+                db.create_session("redaction-test", source="cli")
+                for index, probe in enumerate(probes):
+                    result = self._run(f"print({probe!r})")
+                    db.append_message(
+                        "redaction-test",
+                        role="tool",
+                        content=json.dumps(result, ensure_ascii=False),
+                        tool_name="execute_code",
+                        tool_call_id=f"call-{index}",
+                    )
+
+                persisted = json.dumps(
+                    db.get_messages_as_conversation("redaction-test"),
+                    ensure_ascii=False,
+                )
+            finally:
+                db.close()
+
+        self.assertNotIn("credential-material", persisted)
+        self.assertNotIn("quoted-yaml-material", persisted)
+        self.assertEqual(persisted.count("«redacted-secret»"), 2)
 
     def test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout(self):
         """A no-tool script should not wait seconds for the idle RPC accept thread."""
