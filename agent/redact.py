@@ -258,6 +258,14 @@ _CODE_STRING_LITERAL_RE = re.compile(
     re.IGNORECASE,
 )
 _SOURCE_VALUE_TRAILING_PUNCTUATION = ",;)]}"
+_SOURCE_ATTRIBUTE_MARKERS = frozenset({
+    "config",
+    "credential",
+    "credentials",
+    "settings",
+})
+_SOURCE_USAGE_ROOTS = frozenset({"completion", "response", "result"})
+_PASCAL_CASE_RE = re.compile(r"[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+")
 
 
 def _split_source_value(value: str) -> tuple[str, str]:
@@ -282,9 +290,19 @@ def _is_safe_code_attribute(node: ast.Attribute) -> bool:
     root = base.id
     if root in {"self", "cls", "super"}:
         return True
-    if root.islower() and all(attribute.islower() for attribute in attributes):
+    root_name = root.casefold()
+    attribute_names = {attribute.casefold() for attribute in attributes}
+    if root_name in _SOURCE_ATTRIBUTE_MARKERS or (
+        attribute_names & _SOURCE_ATTRIBUTE_MARKERS
+    ):
         return True
-    return root[:1].isupper() and attributes[0].isupper()
+    if root_name in _SOURCE_USAGE_ROOTS and "usage" in attribute_names:
+        return True
+    return (
+        len(attributes) == 1
+        and _PASCAL_CASE_RE.fullmatch(root) is not None
+        and attributes[0].isupper()
+    )
 
 
 def _is_safe_code_credential_value(value: str) -> bool:

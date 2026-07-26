@@ -1034,7 +1034,9 @@ class TestTerminalOutputRedaction:
         [
             "TOKEN=TokenKind.NAME,",
             "TOKEN=response.usage.prompt_tokens",
+            "TOKEN=Response.usage.prompt_tokens",
             "TOKEN=self.config.auth_token",
+            "TOKEN=client.credentials.token",
             "TOKEN=get_token();",
             'TOKEN=config["token"]',
             "TOKEN=wrap(get_token())",

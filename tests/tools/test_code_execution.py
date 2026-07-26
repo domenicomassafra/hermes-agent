@@ -280,8 +280,12 @@ class TestExecuteCode(unittest.TestCase):
             'telegram_bot_token: "opaque-quoted-yaml-material-12345"',
             'TOKEN="opaque quoted credential with a trailing value"',
             'TOKEN=b"opaque bytes credential with a trailing value"',
+            "DISCORD_BOT_TOKEN=abcdef.xyzabc.ghijkl",
+            "DISCORD_BOT_TOKEN=ABCDEF.XYZABC.GHIJKL",
             "DISCORD_BOT_TOKEN=AbCdEf.GhIjKl.MnOpQr",
             "DISCORD_BOT_TOKEN=AbCdEf_GhIjKl.MnOpQr_StUv",
+            "DISCORD_BOT_TOKEN=abcdef.token.ghijkl",
+            "DISCORD_BOT_TOKEN=ABCDEF.USAGE.GHIJKL",
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -310,11 +314,15 @@ class TestExecuteCode(unittest.TestCase):
             "quoted-yaml-material",
             "quoted credential with a trailing value",
             "bytes credential with a trailing value",
+            "abcdef.xyzabc.ghijkl",
+            "ABCDEF.XYZABC.GHIJKL",
             "AbCdEf.GhIjKl.MnOpQr",
             "AbCdEf_GhIjKl.MnOpQr_StUv",
+            "abcdef.token.ghijkl",
+            "ABCDEF.USAGE.GHIJKL",
         ):
             self.assertNotIn(secret_fragment, persisted)
-        self.assertEqual(persisted.count("redacted-secret"), 6)
+        self.assertEqual(persisted.count("redacted-secret"), 10)
 
     def test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout(self):
         """A no-tool script should not wait seconds for the idle RPC accept thread."""
