@@ -121,6 +121,30 @@ _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
 )
 
+
+def _is_unambiguous_credential_env_name(name: str) -> bool:
+    """Return whether an env name contains an exact credential word.
+
+    ``code_file`` output normally skips assignment redaction because source
+    constants such as ``MAX_TOKENS=100`` are common.  A singular credential
+    suffix is a narrower, safe boundary: ``DISCORD_BOT_TOKEN`` is a credential
+    assignment, while counters such as ``MAX_TOKENS`` and ``TOKEN_COUNT`` are
+    not.  ``API_KEY`` is recognized as the conventional two-part spelling.
+    """
+    parts = name.upper().split("_")
+    if parts[-1] in {
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "AUTH",
+        "APIKEY",
+    }:
+        return True
+    return len(parts) >= 2 and parts[-2:] == ["API", "KEY"]
+
+
 # Lowercase / dotted / hyphenated config keys from config files
 # (application.properties, .env, YAML-ish dumps): ``spring.datasource.password=secret``,
 # ``app.api.key=xyz``, ``password=secret``. The uppercase _ENV_ASSIGN_RE above
@@ -599,22 +623,43 @@ def redact_sensitive_text(
     if file_read:
         code_file = True
 
+    def _redact_env(m, *, nonreusable: bool = False):
+        name, quote, value = m.group(1), m.group(2), m.group(3)
+        # Programmatic env lookups reference variable *names*, not
+        # secret values — masking them corrupts code snippets in
+        # prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
+        if _ENV_LOOKUP_VALUE_RE.match(value):
+            return m.group(0)
+        masker = _mask_token_nonreusable if nonreusable else _mask_token
+        return f"{name}={quote}{masker(value)}{quote}"
+
+    # Preserve the established prefix-mask output for known vendor tokens by
+    # letting the prefix pass below handle them.  This narrow pre-pass exists
+    # for opaque values that no vendor-pattern redactor can recognize.
+    if code_file and "=" in text:
+        text = _ENV_ASSIGN_RE.sub(
+            lambda m: (
+                _redact_env(m, nonreusable=True)
+                if (
+                    _is_unambiguous_credential_env_name(m.group(1))
+                    and _PREFIX_RE.search(m.group(3)) is None
+                )
+                else m.group(0)
+            ),
+            text,
+        )
+
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
         _prefix_sub = _mask_token_nonreusable if file_read else _mask_token
         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
 
-    # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)
-    if not code_file:
-        if "=" in text:
-            def _redact_env(m):
-                name, quote, value = m.group(1), m.group(2), m.group(3)
-                # Programmatic env lookups reference variable *names*, not
-                # secret values — masking them corrupts code snippets in
-                # prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
-                if _ENV_LOOKUP_VALUE_RE.match(value):
-                    return m.group(0)
-                return f"{name}={quote}{_mask_token(value)}{quote}"
+    # ENV assignments: OPENAI_API_KEY=***.  In code/file output, retain a
+    # narrow pass for exact credential env names so terminal/execute_code
+    # persistence boundaries cannot leak opaque platform tokens.  Plural
+    # counters such as MAX_TOKENS still pass through unchanged.
+    if "=" in text:
+        if not code_file:
             text = _ENV_ASSIGN_RE.sub(_redact_env, text)
             # Lowercase/dotted config keys (issue #16413). Skip URLs entirely —
             # web-URL query params are intentionally passed through (see note
@@ -624,6 +669,7 @@ def redact_sensitive_text(
                 text = _CFG_DOTTED_RE.sub(_redact_env, text)
                 text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 
+    if not code_file:
         # JSON fields: "apiKey": "***"  (skip for code files — false positives)
         if ":" in text and '"' in text:
             def _redact_json(m):

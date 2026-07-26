@@ -959,6 +959,53 @@ class TestTerminalOutputRedaction:
         assert "MAX_TOKENS=100" in red
         assert "abc123def456" not in red
 
+    def test_cat_dotenv_grep_masks_opaque_platform_credentials(self):
+        """Credential assignments stay secret even when cat/grep is not
+        classified as a generic environment-dump command.
+        """
+        from agent.redact import redact_terminal_output
+
+        discord_secret = "opaque-app-id.opaque-middle.opaque-secret-material"
+        telegram_secret = "opaque-telegram-material-without-a-known-prefix"
+        out = (
+            f"DISCORD_BOT_TOKEN={discord_secret}\n"
+            f"TELEGRAM_BOT_TOKEN={telegram_secret}\n"
+            "MAX_TOKENS=100\n"
+            "TOKEN_COUNT=2"
+        )
+
+        red = redact_terminal_output(
+            out,
+            "cat /home/example/.hermes/.env | grep -i bot",
+        )
+
+        assert discord_secret not in red
+        assert telegram_secret not in red
+        assert "DISCORD_BOT_TOKEN=" in red
+        assert "TELEGRAM_BOT_TOKEN=" in red
+        assert red.count("«redacted-secret»") == 2
+        assert "MAX_TOKENS=100" in red
+        assert "TOKEN_COUNT=2" in red
+
+    def test_execute_code_output_masks_opaque_platform_credentials(self):
+        """The code-file redaction mode used by execute_code is also a
+        persistence boundary for credential-shaped KEY=VALUE output.
+        """
+        secret = "opaque-app-id.opaque-middle.opaque-secret-material"
+        out = f"DISCORD_BOT_TOKEN={secret}\nMAX_TOKENS=100"
+
+        red = redact_sensitive_text(out, code_file=True, force=True)
+
+        assert secret not in red
+        assert "DISCORD_BOT_TOKEN=" in red
+        assert "«redacted-secret»" in red
+        assert "MAX_TOKENS=100" in red
+
+    def test_code_env_lookup_is_not_mistaken_for_a_credential_value(self):
+        source = "DISCORD_BOT_TOKEN=os.getenv('DISCORD_BOT_TOKEN')"
+
+        assert redact_sensitive_text(source, code_file=True, force=True) == source
+
     def test_unknown_command_uses_safe_code_file_path(self):
         from agent.redact import redact_terminal_output
         # No command → code_file=True; opaque non-prefix token NOT masked

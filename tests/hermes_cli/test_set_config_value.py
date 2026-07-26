@@ -369,6 +369,66 @@ class TestListNavigation:
         assert allowlist[0] == {"name": "alice", "role": "admin"}
         assert allowlist[1] == {"name": "bob", "role": "admin"}
 
+    def test_bracketed_indices_update_existing_list_without_literal_keys(
+        self, _isolated_hermes_home
+    ):
+        """Common YAML-path bracket syntax must navigate lists rather than
+        silently creating literal ``dm_topics[0]`` mapping keys.
+        """
+        self._write_config(_isolated_hermes_home, (
+            "platforms:\n"
+            "  telegram:\n"
+            "    extra:\n"
+            "      dm_topics:\n"
+            "      - chat_id: 123\n"
+            "        topics:\n"
+            "        - name: Old name\n"
+            "          thread_id: 456\n"
+        ))
+
+        set_config_value(
+            "platforms.telegram.extra.dm_topics[0].topics[0].name",
+            "New name",
+        )
+
+        import yaml
+        reloaded = yaml.safe_load(_read_config(_isolated_hermes_home))
+        assert set(reloaded) == {"platforms"}
+        extra = reloaded["platforms"]["telegram"]["extra"]
+        assert extra["dm_topics"][0]["topics"][0] == {
+            "name": "New name",
+            "thread_id": 456,
+        }
+        assert "dm_topics[0]" not in extra
+        assert "topics[0]" not in extra
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "platforms.telegram.extra.dm_topics[].name",
+            "platforms.telegram.extra.dm_topics[zero].name",
+            "platforms.telegram.extra.dm_topics[0.name",
+            "platforms.telegram.extra.dm_topics0].name",
+        ],
+    )
+    def test_malformed_bracketed_indices_fail_before_write(
+        self, _isolated_hermes_home, capsys, key
+    ):
+        original = (
+            "platforms:\n"
+            "  telegram:\n"
+            "    extra:\n"
+            "      dm_topics: []\n"
+        )
+        self._write_config(_isolated_hermes_home, original)
+
+        with pytest.raises(SystemExit) as exc:
+            set_config_value(key, "New name")
+
+        assert exc.value.code == 1
+        assert _read_config(_isolated_hermes_home) == original
+        assert "invalid config key path" in capsys.readouterr().err.lower()
+
 
 # ---------------------------------------------------------------------------
 # String-typed config values — regression tests for #47515

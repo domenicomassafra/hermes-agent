@@ -245,6 +245,15 @@ class TestExecuteCode(unittest.TestCase):
         self.assertIn("hello world", result["output"])
         self.assertEqual(result["tool_calls_made"], 0)
 
+    def test_opaque_credential_assignment_is_redacted(self):
+        """Opaque credential output must not cross the execute_code boundary."""
+        secret = "opaque-app-id.opaque-middle.opaque-secret-material"
+        result = self._run(f'print("DISCORD_BOT_TOKEN={secret}")')
+
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn(secret, result["output"])
+        self.assertIn("DISCORD_BOT_TOKEN=«redacted-secret»", result["output"])
+
     def test_no_tool_call_script_does_not_wait_for_rpc_accept_timeout(self):
         """A no-tool script should not wait seconds for the idle RPC accept thread."""
         start = time.monotonic()

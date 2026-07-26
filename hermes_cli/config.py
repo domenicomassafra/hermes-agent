@@ -4918,12 +4918,45 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
     return missing
 
 
+_BRACKET_INDEX_RE = re.compile(r"\[(\d+)\]")
+
+
+def _parse_nested_path(dotted_key: str) -> List[Any]:
+    """Parse dotted config paths, including safe ``name[0]`` list indices.
+
+    Brackets are syntax, never literal mapping-key characters.  Any malformed
+    or non-numeric bracket expression is rejected before the caller mutates or
+    persists the config.
+    """
+    parts: List[Any] = []
+    for segment in dotted_key.split("."):
+        if "[" not in segment and "]" not in segment:
+            parts.append(segment)
+            continue
+
+        bracket_at = segment.find("[")
+        if bracket_at <= 0 or "]" in segment[:bracket_at]:
+            raise ValueError(f"malformed bracket index in segment {segment!r}")
+
+        parts.append(segment[:bracket_at])
+        position = bracket_at
+        while position < len(segment):
+            match = _BRACKET_INDEX_RE.match(segment, position)
+            if match is None:
+                raise ValueError(f"malformed bracket index in segment {segment!r}")
+            parts.append(int(match.group(1)))
+            position = match.end()
+
+    return parts
+
+
 def _set_nested(config, dotted_key: str, value):
     """Set a value at an arbitrarily nested dotted key path.
 
     Supports both dict and list navigation:
       _set_nested(c, "a.b.c", 1)     → c["a"]["b"]["c"] = 1
       _set_nested(c, "a.0.b", 1)     → c["a"][0]["b"] = 1
+      _set_nested(c, "a[0].b", 1)    → c["a"][0]["b"] = 1
       _set_nested(c, "providers.1", "x") → c["providers"][1] = "x"
 
     Intermediate dicts are created on demand.  List indices are parsed
@@ -4940,19 +4973,26 @@ def _set_nested(config, dotted_key: str, value):
     destroying list-typed config like ``custom_providers`` whenever a
     caller used an indexed path.
     """
-    parts = dotted_key.split(".")
+    parts = _parse_nested_path(dotted_key)
     current = config
     for part in parts[:-1]:
         if isinstance(current, list):
-            try:
-                idx = int(part)
-            except (TypeError, ValueError):
-                raise TypeError(
-                    f"Cannot navigate into list at key {dotted_key!r}: "
-                    f"segment {part!r} is not a numeric index"
-                )
+            if isinstance(part, int):
+                idx = part
+            else:
+                try:
+                    idx = int(part)
+                except (TypeError, ValueError):
+                    raise TypeError(
+                        f"Cannot navigate into list at key {dotted_key!r}: "
+                        f"segment {part!r} is not a numeric index"
+                    )
             current = current[idx]
         elif isinstance(current, dict):
+            if isinstance(part, int):
+                raise TypeError(
+                    f"Cannot index mapping at key {dotted_key!r} with list index {part}"
+                )
             existing = current.get(part)
             # Preserve dicts and lists; replace missing/scalar with a fresh dict.
             if part not in current or not isinstance(existing, (dict, list)):
@@ -4966,6 +5006,10 @@ def _set_nested(config, dotted_key: str, value):
     if isinstance(current, list):
         current[int(last)] = value
     else:
+        if isinstance(last, int):
+            raise TypeError(
+                f"Cannot index mapping at key {dotted_key!r} with list index {last}"
+            )
         current[last] = value
 
 
@@ -9035,7 +9079,11 @@ def set_config_value(key: str, value: str, force: bool = False):
             coerced_value = float(value)
 
     value = coerced_value
-    _set_nested(user_config, key, value)
+    try:
+        _set_nested(user_config, key, value)
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        print(f"Invalid config key path {key!r}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     # Normalize the api_base → base_url alias at set-time too (issue #8919),
     # so a fresh `hermes config set model.api_base ...` lands on the canonical
     # key the runtime resolver actually reads, instead of being silently
