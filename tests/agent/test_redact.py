@@ -1033,6 +1033,8 @@ class TestTerminalOutputRedaction:
         "source",
         [
             "TOKEN=TokenKind.NAME,",
+            "TOKEN=response.usage.prompt_tokens",
+            "TOKEN=self.config.auth_token",
             "TOKEN=get_token();",
             'TOKEN=config["token"]',
             "TOKEN=wrap(get_token())",

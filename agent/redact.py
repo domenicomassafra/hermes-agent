@@ -266,6 +266,27 @@ def _split_source_value(value: str) -> tuple[str, str]:
     return core, value[len(core):]
 
 
+def _is_safe_code_attribute(node: ast.Attribute) -> bool:
+    """Return whether an attribute chain has unmistakable source-code shape."""
+    attributes = []
+    base = node
+    while isinstance(base, ast.Attribute):
+        attributes.append(base.attr)
+        base = base.value
+
+    if isinstance(base, (ast.Call, ast.Subscript)):
+        return True
+    if not isinstance(base, ast.Name):
+        return False
+
+    root = base.id
+    if root in {"self", "cls", "super"}:
+        return True
+    if root.islower() and all(attribute.islower() for attribute in attributes):
+        return True
+    return root[:1].isupper() and attributes[0].isupper()
+
+
 def _is_safe_code_credential_value(value: str) -> bool:
     """Return whether a credential-named source value is clearly non-secret.
 
@@ -278,16 +299,11 @@ def _is_safe_code_credential_value(value: str) -> bool:
         node = ast.parse(expression, mode="eval").body
     except (SyntaxError, ValueError):
         node = None
+    if isinstance(node, ast.Attribute):
+        return _is_safe_code_attribute(node)
     if isinstance(
         node,
-        (
-            ast.Attribute,
-            ast.Await,
-            ast.Call,
-            ast.JoinedStr,
-            ast.Lambda,
-            ast.Subscript,
-        ),
+        (ast.Await, ast.Call, ast.JoinedStr, ast.Lambda, ast.Subscript),
     ):
         return True
     if not expression or _ENV_LOOKUP_VALUE_RE.match(expression):
