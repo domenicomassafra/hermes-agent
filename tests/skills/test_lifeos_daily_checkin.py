@@ -69,6 +69,18 @@ def test_preview_uses_the_shared_actor_surface_and_key(tmp_path):
     assert result["operation_id"] == "operation"
 
 
+def test_http_origin_is_rejected_before_credentials_are_sent(tmp_path):
+    mod = load_module()
+    auth, payload = write_inputs(tmp_path)
+
+    with patch.object(mod.urllib.request, "urlopen") as urlopen, pytest.raises(
+        mod.CheckinError, match="HTTPS"
+    ):
+        mod.preview("http://127.0.0.1:8443", str(auth), str(payload), "shared-key")
+
+    urlopen.assert_not_called()
+
+
 def test_apply_reuses_preview_identity_key_and_requires_exact_confirmation(tmp_path):
     mod = load_module()
     auth, payload = write_inputs(tmp_path)

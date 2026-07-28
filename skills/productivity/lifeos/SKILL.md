@@ -28,6 +28,9 @@ same operation contract.
 - The owner provides an existing Signal Deck session cookie and CSRF token in an
   owner-only JSON file. Do not place either in prompts, command history, source
   control, or receipts.
+- The Signal Deck origin must use HTTPS. The helper refuses HTTP before loading
+  or sending session credentials; there is no loopback exception in this
+  contract.
 - Read the returned preview before applying. Hermes cannot approve its own
   mutation: applying requires the owner to explicitly say `APPLICA`.
 - The helper records this caller as `caller_type=agent`,

@@ -39,8 +39,8 @@ def _json_file(path: str) -> dict[str, Any]:
 
 def _base_url(value: str) -> str:
     parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path not in {"", "/"}:
-        raise CheckinError("base URL must be an absolute origin without a path")
+    if parsed.scheme != "https" or not parsed.netloc or parsed.path not in {"", "/"}:
+        raise CheckinError("base URL must be an HTTPS origin without a path")
     return value.rstrip("/")
 
 
