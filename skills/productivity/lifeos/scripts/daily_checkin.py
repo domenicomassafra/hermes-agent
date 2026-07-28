@@ -27,6 +27,17 @@ class CheckinError(RuntimeError):
     """An actionable contract or transport failure."""
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            fp.close()
+        finally:
+            raise CheckinError(f"Signal Deck redirect rejected: HTTP {code}")
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
 def _json_file(path: str) -> dict[str, Any]:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -75,7 +86,7 @@ def _request(
         )
     request = urllib.request.Request(f"{base_url}{CHECKIN_PATH}{suffix}", data=data, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _OPENER.open(request, timeout=20) as response:
             decoded = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:500]
