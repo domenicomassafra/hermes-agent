@@ -109,6 +109,7 @@ def adapter(monkeypatch):
         "DISCORD_REQUIRE_MENTION",
         "DISCORD_THREAD_REQUIRE_MENTION",
         "DISCORD_FREE_RESPONSE_CHANNELS",
+        "DISCORD_AUTO_THREAD_CHANNELS",
         "DISCORD_AUTO_THREAD",
         "DISCORD_NO_THREAD_CHANNELS",
         "DISCORD_ALLOWED_CHANNELS",
@@ -683,6 +684,50 @@ async def test_discord_free_response_channel_skips_auto_thread(adapter, monkeypa
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "casual chat in free-response channel"
     assert event.source.chat_type == "group"
+
+
+@pytest.mark.asyncio
+async def test_discord_auto_thread_channel_is_mention_free_and_threaded(adapter, monkeypatch):
+    """Configured task-inbox channels bypass mentions and create a thread."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD_CHANNELS", "789")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+
+    parent = FakeTextChannel(channel_id=789, name="chat")
+    thread = FakeThread(channel_id=790, name="isolated-task", parent=parent)
+    adapter._auto_create_thread = AsyncMock(return_value=thread)
+
+    message = make_message(channel=parent, content="start a separate task")
+    await adapter._handle_message(message)
+
+    adapter._auto_create_thread.assert_awaited_once()
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.chat_type == "thread"
+    assert event.source.thread_id == "790"
+
+
+@pytest.mark.asyncio
+async def test_discord_auto_thread_parent_keeps_followups_mention_free(adapter, monkeypatch):
+    """Child threads inherit the task-inbox parent's mention exemption."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_THREAD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD_CHANNELS", "789")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+
+    parent = FakeTextChannel(channel_id=789, name="chat")
+    thread = FakeThread(channel_id=790, name="isolated-task", parent=parent)
+    adapter._auto_create_thread = AsyncMock()
+
+    message = make_message(channel=thread, content="continue without mentioning the bot")
+    await adapter._handle_message(message)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.chat_type == "thread"
 
 
 

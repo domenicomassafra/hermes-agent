@@ -17,6 +17,7 @@ Before setup, here's the part most people want to know: how Hermes behaves once 
 | **DMs** | Hermes responds to every message. No `@mention` needed. Each DM has its own session. |
 | **Server channels** | By default, Hermes only responds when you `@mention` it. If you post in a channel without mentioning it, Hermes ignores the message. |
 | **Free-response channels** | You can make specific channels mention-free with `DISCORD_FREE_RESPONSE_CHANNELS`, or disable mentions globally with `DISCORD_REQUIRE_MENTION=false`. Messages in these channels are answered inline — auto-threading is skipped so the channel stays a lightweight chat. |
+| **Auto-thread channels** | Set `discord.auto_thread_channels` in `config.yaml` for mention-free task-inbox channels where every new top-level message starts an isolated thread. Child-thread follow-ups stay mention-free. `no_thread_channels` takes precedence if a channel appears in both lists. |
 | **Threads** | Hermes replies in the same thread. Mention rules still apply unless that thread or its parent channel is configured as free-response. Threads stay isolated from the parent channel for session history. |
 | **Shared channels with multiple users** | By default, Hermes isolates session history per user inside the channel for safety and clarity. Two people talking in the same channel do not share one transcript unless you explicitly disable that. |
 | **Messages mentioning other users** | When `DISCORD_IGNORE_NO_MENTION` is `true` (the default), Hermes stays silent if a message @mentions other users but does **not** mention the bot. This prevents the bot from jumping into conversations directed at other people. Set to `false` if you want the bot to respond to all messages regardless of who is mentioned. This only applies in server channels, not DMs. |
@@ -24,6 +25,15 @@ Before setup, here's the part most people want to know: how Hermes behaves once 
 :::tip
 If you want a normal bot-help channel where people can talk to Hermes without tagging it every time, add that channel to `DISCORD_FREE_RESPONSE_CHANNELS`.
 :::
+
+For a two-channel personal server, use:
+
+```yaml
+discord:
+  free_response_channels: ["GENERAL_CHANNEL_ID"]
+  auto_thread_channels: ["CHAT_CHANNEL_ID"]
+  no_thread_channels: ["GENERAL_CHANNEL_ID"]
+```
 
 ### Discord Gateway Model
 
