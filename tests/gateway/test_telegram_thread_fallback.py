@@ -137,6 +137,30 @@ def _make_adapter():
     return adapter
 
 
+@pytest.mark.asyncio
+async def test_control_message_does_not_fall_back_to_root_when_configured():
+    """Topic-routed operational profiles must fail rather than send at root."""
+    adapter = _make_adapter()
+    adapter.config.extra["forbid_root_topic_fallback"] = True
+    calls = []
+
+    async def send_message(**kwargs):
+        calls.append(kwargs)
+        raise FakeBadRequest("Message thread not found")
+
+    adapter._bot = SimpleNamespace(send_message=send_message)
+
+    with pytest.raises(FakeBadRequest):
+        await adapter._send_message_with_thread_fallback(
+            chat_id=123,
+            text="must remain in topic",
+            message_thread_id=456,
+        )
+
+    assert len(calls) == 1
+    assert calls[0]["message_thread_id"] == 456
+
+
 def test_non_forum_group_reply_thread_id_does_not_fork_session_key():
     """Reply-derived thread ids in ordinary groups must not create topic lanes."""
     import plugins.platforms.telegram.adapter as telegram_mod
@@ -404,6 +428,31 @@ async def test_send_retries_without_thread_on_thread_not_found():
     assert call_log[0]["message_thread_id"] == 99999
     assert call_log[1]["message_thread_id"] == 99999
     assert call_log[2]["message_thread_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_send_fails_in_topic_when_root_fallback_is_forbidden():
+    """The scoped profile may retry the same topic but must never send at root."""
+    adapter = _make_adapter()
+    adapter.config.extra["forbid_root_topic_fallback"] = True
+    call_log = []
+
+    async def mock_send_message(**kwargs):
+        call_log.append(dict(kwargs))
+        raise FakeBadRequest("Message thread not found")
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+
+    result = await adapter.send(
+        chat_id="-100123",
+        content="must remain in topic",
+        metadata={"thread_id": "99999"},
+    )
+
+    assert result.success is False
+    assert result.retryable is False
+    assert len(call_log) == 1
+    assert all(call["message_thread_id"] == 99999 for call in call_log)
 
 
 @pytest.mark.asyncio

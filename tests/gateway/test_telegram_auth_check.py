@@ -5,7 +5,7 @@ event building, or response generation occurs.
 """
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -68,6 +68,8 @@ def _make_message(text="hello", *, from_user_id=111, chat_id=-100, chat_type="gr
         document=None,
         sticker=None,
         media_group_id=None,
+        forward_origin=None,
+        is_automatic_forward=False,
     )
 
 
@@ -362,6 +364,48 @@ async def test_media_from_removed_user_blocked_before_event_building(monkeypatch
     assert build_called is False
     adapter.handle_message.assert_not_awaited()
     document.get_file.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_name, message_setup",
+    [
+        ("_handle_text_message", lambda msg: None),
+        ("_handle_command", lambda msg: setattr(msg, "text", "/new")),
+        ("_handle_location_message", lambda msg: setattr(msg, "location", SimpleNamespace(latitude=1, longitude=2))),
+        ("_handle_media_message", lambda msg: setattr(msg, "document", SimpleNamespace(get_file=AsyncMock()))),
+    ],
+)
+async def test_forwarded_messages_are_rejected_before_any_event_or_media_work(handler_name, message_setup):
+    """The profile gate is transport-level, not a model instruction."""
+    adapter = _make_adapter(reject_forwarded_messages=True)
+    adapter.handle_message = AsyncMock()
+    adapter._build_message_event = Mock(side_effect=AssertionError("forward built an event"))
+    msg = _make_message(chat_id=111, chat_type="private")
+    msg.forward_origin = SimpleNamespace(type="user")
+    message_setup(msg)
+    update = SimpleNamespace(update_id=1, message=msg, effective_message=None)
+
+    await getattr(adapter, handler_name)(update, SimpleNamespace())
+
+    adapter._build_message_event.assert_not_called()
+    adapter.handle_message.assert_not_awaited()
+
+
+def test_legacy_forward_metadata_is_also_rejected_when_gate_enabled():
+    adapter = _make_adapter(reject_forwarded_messages=True)
+    msg = _make_message(chat_id=111, chat_type="private")
+    msg.forward_sender_name = "Source without public account"
+
+    assert adapter._reject_forwarded_message_at_intake(msg) is True
+
+
+def test_forward_gate_is_opt_in_for_existing_profiles():
+    adapter = _make_adapter()
+    msg = _make_message(chat_id=111, chat_type="private")
+    msg.forward_origin = SimpleNamespace(type="user")
+
+    assert adapter._reject_forwarded_message_at_intake(msg) is False
 
 
 @pytest.mark.asyncio

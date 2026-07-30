@@ -1306,6 +1306,17 @@ class TelegramAdapter(BasePlatformAdapter):
                 return True
         return False
 
+    def _forbid_root_topic_fallback(self) -> bool:
+        """Return whether a failed topic send must never fall back to the root chat.
+
+        This is intentionally per-profile configuration. Existing Telegram
+        profiles retain the historical best-effort fallback unless enabled.
+        """
+        configured = self.config.extra.get("forbid_root_topic_fallback", False)
+        if isinstance(configured, str):
+            return configured.lower() in {"true", "1", "yes", "on"}
+        return bool(configured)
+
     async def _send_with_dm_topic_reply_anchor_retry(
         self,
         send_fn: Any,
@@ -1319,6 +1330,8 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             return await send_fn(**send_kwargs)
         except Exception as send_err:
+            if self._forbid_root_topic_fallback():
+                raise
             if not self._should_retry_without_dm_topic_reply_anchor(
                 send_err,
                 metadata,
@@ -4399,6 +4412,12 @@ class TelegramAdapter(BasePlatformAdapter):
                                         error=str(send_err),
                                         retryable=False,
                                     )
+                                if self._forbid_root_topic_fallback():
+                                    return SendResult(
+                                        success=False,
+                                        error=_redact_telegram_error_text(send_err),
+                                        retryable=False,
+                                    )
                                 # Telegram has been observed to return a
                                 # one-off "thread not found" that recovers on
                                 # an immediate retry (transient flake — see
@@ -4449,6 +4468,12 @@ class TelegramAdapter(BasePlatformAdapter):
                                 )
                                 reply_to_id = None
                                 if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
+                                    if self._forbid_root_topic_fallback():
+                                        return SendResult(
+                                            success=False,
+                                            error=safe_send_error,
+                                            retryable=False,
+                                        )
                                     thread_kwargs = {}
                                     effective_thread_id = None
                                 else:
@@ -5174,6 +5199,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 and self._is_bad_request_error(send_err)
                 and self._is_thread_not_found_error(send_err)
             ):
+                if self._forbid_root_topic_fallback():
+                    raise
                 logger.warning(
                     "[%s] Thread %s not found for control message, retrying without message_thread_id",
                     self.name,
@@ -7560,6 +7587,46 @@ class TelegramAdapter(BasePlatformAdapter):
             return bool(configured)
         return os.getenv("TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES", "false").lower() in {"true", "1", "yes", "on"}
 
+    def _telegram_reject_forwarded_messages(self) -> bool:
+        """Return whether forwarded Telegram messages are blocked at intake."""
+        configured = self.config.extra.get("reject_forwarded_messages", False)
+        if isinstance(configured, str):
+            return configured.lower() in {"true", "1", "yes", "on"}
+        return bool(configured)
+
+    @staticmethod
+    def _is_forwarded_message(message: Message) -> bool:
+        """Recognize current and legacy PTB forward-provenance fields."""
+        if getattr(message, "forward_origin", None) is not None:
+            return True
+        if bool(getattr(message, "is_automatic_forward", False)):
+            return True
+        return any(
+            getattr(message, field, None) is not None
+            for field in (
+                "forward_from",
+                "forward_from_chat",
+                "forward_from_message_id",
+                "forward_sender_name",
+                "forward_date",
+                "forward_signature",
+            )
+        )
+
+    def _reject_forwarded_message_at_intake(self, message: Message) -> bool:
+        """Fail closed before auth, event construction, batching, or downloads."""
+        if not self._telegram_reject_forwarded_messages():
+            return False
+        if not self._is_forwarded_message(message):
+            return False
+        logger.warning(
+            "[%s] Rejected forwarded Telegram message at intake (chat=%s message=%s)",
+            getattr(self, "name", "telegram"),
+            getattr(getattr(message, "chat", None), "id", None),
+            getattr(message, "message_id", None),
+        )
+        return True
+
     def _telegram_guest_mode(self) -> bool:
         """Return whether non-allowlisted groups may trigger via direct @mention."""
         configured = self.config.extra.get("guest_mode")
@@ -8396,6 +8463,8 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        if self._reject_forwarded_message_at_intake(msg):
+            return
         # Early user-level auth check: reject unauthorized users before any
         # text batching, observe-buffer persistence, event building, or response
         # generation. This prevents removed/blocked users from injecting prompts
@@ -8424,6 +8493,8 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        if self._reject_forwarded_message_at_intake(msg):
+            return
         if not self._should_process_message(msg, is_command=True):
             return
         if not self._is_user_authorized_from_message(msg):
@@ -8445,6 +8516,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
         if not msg:
+            return
+        if self._reject_forwarded_message_at_intake(msg):
             return
         if not self._is_user_authorized_from_message(msg):
             logger.warning(
@@ -8649,6 +8722,8 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _handle_media_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming media messages, downloading images to local cache."""
         if not update.message:
+            return
+        if self._reject_forwarded_message_at_intake(update.message):
             return
         if not self._is_user_authorized_from_message(update.message):
             logger.info(
@@ -9583,6 +9658,9 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
 
     if "disable_topic_auto_rename" in telegram_cfg:
         extras.setdefault("disable_topic_auto_rename", telegram_cfg["disable_topic_auto_rename"])
+    for _key in ("reject_forwarded_messages", "forbid_root_topic_fallback"):
+        if _key in telegram_cfg:
+            extras.setdefault(_key, telegram_cfg[_key])
 
     _effective_rm = telegram_cfg.get("require_mention", yaml_cfg.get("require_mention"))
     if _effective_rm is not None and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
