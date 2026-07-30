@@ -331,6 +331,15 @@ class TestMentionGating:
         assert adapter._dispatched == []
 
     @pytest.mark.asyncio
+    async def test_explicit_buzz_reply_carries_its_thread_parent(self, adapter):
+        event = _event("e1", content="@Chip continue", created_at=10)
+        event["tags"].append(["e", "parent-event", "", "reply"])
+
+        await self._poll_with(adapter, event)
+
+        assert adapter._dispatched[0]["thread_id"] == "parent-event"
+
+    @pytest.mark.asyncio
     async def test_name_mention_dispatched(self, adapter):
         await self._poll_with(adapter, _event("e1", content="hey @Chip can you help?", created_at=10))
         assert len(adapter._dispatched) == 1

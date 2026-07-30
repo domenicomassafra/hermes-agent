@@ -583,6 +583,20 @@ def test_base_gateway_replies_to_triggering_message_for_telegram_dm_topic():
     assert _reply_anchor_for_event(event) == "463"
 
 
+def test_base_gateway_keeps_buzz_top_level_flat_and_explicit_threads_anchored():
+    top_level = SimpleNamespace(
+        message_id="buzz-message",
+        source=SimpleNamespace(platform="buzz", chat_type="group", thread_id=None),
+    )
+    threaded = SimpleNamespace(
+        message_id="buzz-reply",
+        source=SimpleNamespace(platform="buzz", chat_type="group", thread_id="buzz-parent"),
+    )
+
+    assert _reply_anchor_for_event(top_level) is None
+    assert _reply_anchor_for_event(threaded) == "buzz-parent"
+
+
 @pytest.mark.asyncio
 async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegram_dm_topic(monkeypatch, tmp_path):
     """GatewayRunner's duplicate thread metadata must match the base helper."""

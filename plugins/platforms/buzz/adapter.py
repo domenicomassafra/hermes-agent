@@ -784,7 +784,26 @@ class BuzzAdapter(BasePlatformAdapter):
             user_name=await self._resolve_user_name(pubkey),
             message_id=event_id,
             created_at=created_at,
+            thread_id=self._thread_id_from_event(event),
         )
+
+    @staticmethod
+    def _thread_id_from_event(event: dict) -> Optional[str]:
+        """Return the explicit Nostr reply parent, if this is a Buzz thread."""
+        tags = event.get("tags")
+        if not isinstance(tags, list):
+            return None
+        for marker in ("root", "reply"):
+            for tag in tags:
+                if (
+                    isinstance(tag, (list, tuple))
+                    and len(tag) > 3
+                    and tag[0] == "e"
+                    and tag[3] == marker
+                    and tag[1]
+                ):
+                    return str(tag[1])
+        return None
 
     # ── DM classification (issue #68871) ──────────────────────────────────
     #
@@ -947,6 +966,7 @@ class BuzzAdapter(BasePlatformAdapter):
         user_name: str,
         message_id: str,
         created_at: int,
+        thread_id: Optional[str] = None,
     ) -> None:
         """Build a MessageEvent and hand it to the base class handler."""
         if not self._message_handler:
@@ -958,6 +978,7 @@ class BuzzAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=user_id,
             user_name=user_name,
+            thread_id=thread_id,
         )
 
         event = MessageEvent(

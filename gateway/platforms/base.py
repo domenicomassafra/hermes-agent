@@ -125,6 +125,11 @@ def _reply_anchor_for_event(event) -> str | None:
         return None
     if platform == "feishu" and thread_id and getattr(event, "reply_to_message_id", None):
         return getattr(event, "reply_to_message_id", None)
+    if platform == "buzz":
+        # Buzz renders --reply-to as a visible side-thread. A top-level
+        # channel message must remain flat, while an inbound Buzz reply
+        # keeps its explicit parent thread.
+        return str(thread_id) if thread_id else None
     return getattr(event, "message_id", None)
 
 
