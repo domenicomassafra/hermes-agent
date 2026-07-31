@@ -572,6 +572,12 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     if _gateway_surface_passes_raw_text(platform):
         return text
 
+    # The conversation loop returns the terminal condition as the final
+    # response.  Rendering its callback as a standalone status would produce
+    # two chat bubbles for one turn; preserve it for CLI/local diagnostics.
+    if event_type == "terminal":
+        return None
+
     text = _redact_gateway_user_facing_secrets(text)
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
         # Opt-in #52995: `compression.progress_notices: true` lets ROUTINE

@@ -4575,17 +4575,17 @@ def run_conversation(
                     if classified.reason == FailoverReason.content_policy_blocked:
                         agent._emit_status(
                             f"❌ Provider safety filter blocked this request: "
-                            f"{_nonretryable_summary}"
+                            f"{_nonretryable_summary}", event_type="terminal"
                         )
                     elif classified.reason == FailoverReason.ssl_cert_verification:
                         agent._emit_status(
                             f"❌ TLS certificate verification failed: "
-                            f"{_nonretryable_summary}"
+                            f"{_nonretryable_summary}", event_type="terminal"
                         )
                     else:
                         agent._emit_status(
                             f"❌ Non-retryable error (HTTP {status_code}): "
-                            f"{_nonretryable_summary}"
+                            f"{_nonretryable_summary}", event_type="terminal"
                         )
                     agent._vprint(f"{agent.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
                     agent._vprint(f"{agent.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
@@ -4786,7 +4786,10 @@ def run_conversation(
                     _final_summary = agent._summarize_api_error(api_error)
                     _billing_guidance = ""
                     if classified.reason == FailoverReason.billing:
-                        agent._emit_status(f"❌ Billing or credits exhausted — {_final_summary}")
+                        agent._emit_status(
+                            f"❌ Billing or credits exhausted — {_final_summary}",
+                            event_type="terminal",
+                        )
                         _billing_guidance = _billing_or_entitlement_message(
                             capability="model access",
                             provider=_provider,
@@ -4801,9 +4804,15 @@ def run_conversation(
                             model=_model,
                         )
                     elif is_rate_limited:
-                        agent._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
+                        agent._emit_status(
+                            f"❌ Rate limited after {max_retries} retries — {_final_summary}",
+                            event_type="terminal",
+                        )
                     else:
-                        agent._emit_status(f"❌ API failed after {max_retries} retries — {_final_summary}")
+                        agent._emit_status(
+                            f"❌ API failed after {max_retries} retries — {_final_summary}",
+                            event_type="terminal",
+                        )
                     agent._vprint(f"{agent.log_prefix}   💀 Final error: {_final_summary}", force=True)
 
                     # Detect SSE stream-drop pattern (e.g. "Network
