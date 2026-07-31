@@ -1081,6 +1081,181 @@ class TelegramAdapter(BasePlatformAdapter):
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
         return "*" in allowed_ids or user_id in allowed_ids
 
+    def _telegram_ingress_profile_name(self) -> str:
+        """Resolve the profile for the narrow profile-specific ingress guard."""
+        configured = self.config.extra.get("profile_name")
+        if configured is not None:
+            return str(configured).strip().lower()
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            return str(get_active_profile_name() or "").strip().lower()
+        except Exception:
+            return ""
+
+    def _is_signor_rivendita_ingress(self) -> bool:
+        return self._telegram_ingress_profile_name() == "signorrivendita"
+
+    @staticmethod
+    def _telegram_positive_id(value: object) -> Optional[str]:
+        """Normalize a strictly positive Telegram message or topic identifier."""
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return str(parsed) if parsed > 0 else None
+
+    @staticmethod
+    def _telegram_chat_id(value: object) -> Optional[str]:
+        """Normalize a non-zero signed Telegram chat identifier."""
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return str(parsed) if parsed != 0 else None
+
+    @staticmethod
+    def _telegram_message_is_forwarded(message: Message) -> bool:
+        """Recognize current and legacy python-telegram-bot forward fields."""
+        return bool(
+            getattr(message, "forward_origin", None)
+            or getattr(message, "is_automatic_forward", False)
+            or getattr(message, "forward_date", None)
+            or getattr(message, "forward_from", None)
+            or getattr(message, "forward_from_chat", None)
+            or getattr(message, "forward_sender_name", None)
+        )
+
+    def _telegram_sender_class(self, message: Message) -> tuple[str, bool, Optional[str]]:
+        """Classify sender provenance without serializing personal profile data."""
+        user = getattr(message, "from_user", None)
+        if user is not None:
+            is_bot = bool(getattr(user, "is_bot", False))
+            return ("bot" if is_bot else "user"), is_bot, self._telegram_positive_id(getattr(user, "id", None))
+        if getattr(message, "sender_chat", None) is not None:
+            return "sender_chat", False, None
+        return "missing", False, None
+
+    def _telegram_signor_owner_ids(self, message: Message) -> set[str]:
+        """Return explicit owner IDs; wildcard authorization is not owner proof."""
+        source = self._source_from_message_for_auth(message)
+        key = "group_allow_from" if source.chat_type in {"group", "forum", "channel"} else "allow_from"
+        raw = self.config.extra.get(key)
+        if raw is None:
+            env_key = "TELEGRAM_GROUP_ALLOWED_USERS" if key == "group_allow_from" else "TELEGRAM_ALLOWED_USERS"
+            raw = os.getenv(env_key, "")
+        return {item for item in _coerce_allow_set(raw) if item and item != "*"}
+
+    def _telegram_has_exact_signor_topic(self, message: Message, chat_id: str, topic_id: str) -> bool:
+        """Require a configured exact chat/topic binding for Signor Rivendita."""
+        exact = f"{chat_id}:{topic_id}"
+        if exact in self._telegram_free_response_topics():
+            return True
+
+        dm_topics = getattr(self, "_dm_topics_config", [])
+        if isinstance(dm_topics, list):
+            for entry in dm_topics:
+                if not isinstance(entry, dict) or str(entry.get("chat_id", "")) != chat_id:
+                    continue
+                for topic in entry.get("topics", []):
+                    if isinstance(topic, dict) and str(topic.get("thread_id", "")) == topic_id:
+                        return True
+
+        group_topics = self.config.extra.get("group_topics", [])
+        if isinstance(group_topics, dict):
+            group_topics = [
+                {"chat_id": configured_chat, "topics": topics}
+                for configured_chat, topics in group_topics.items()
+            ]
+        if isinstance(group_topics, list):
+            for entry in group_topics:
+                if not isinstance(entry, dict) or str(entry.get("chat_id", "")) != chat_id:
+                    continue
+                for topic in entry.get("topics", []):
+                    if isinstance(topic, dict) and str(topic.get("thread_id", "")) == topic_id:
+                        return True
+
+        # The legacy paired allowlists remain an exact binding only where both
+        # configured sets explicitly contain this message's chat and topic.
+        return chat_id in self._telegram_allowed_chats() and topic_id in self._telegram_allowed_topics()
+
+    def _telegram_ingress_store(self):
+        store = getattr(self, "_signor_rivendita_ingress_store", None)
+        if store is None:
+            from plugins.platforms.telegram.ingress_receipts import TelegramIngressReceiptStore
+
+            store = TelegramIngressReceiptStore()
+            self._signor_rivendita_ingress_store = store
+        return store
+
+    def _admit_signor_rivendita_ingress(self, message: Message) -> bool:
+        """Fail closed before any session, model, tool, or media action.
+
+        This is intentionally profile-scoped. Other Hermes profiles preserve
+        their established ingress behavior while Signor Rivendita receives an
+        auditable direct-owner, exact-topic, non-forwarded boundary.
+        """
+        if not self._is_signor_rivendita_ingress():
+            return True
+
+        from plugins.platforms.telegram.ingress_receipts import (
+            build_invalid_identity_key,
+            build_redacted_receipt,
+        )
+
+        chat_id = self._telegram_chat_id(getattr(getattr(message, "chat", None), "id", None))
+        topic_id = self._telegram_positive_id(self._effective_message_thread_id(message))
+        message_id = self._telegram_positive_id(getattr(message, "message_id", None))
+        sender_class, is_bot, sender_id = self._telegram_sender_class(message)
+        forwarded = self._telegram_message_is_forwarded(message)
+
+        decision = "accepted"
+        if not chat_id or not topic_id or not message_id or not sender_id:
+            decision = "rejected_missing_provenance"
+        elif is_bot:
+            decision = "rejected_bot_sender"
+        elif forwarded:
+            decision = "rejected_forwarded"
+        elif sender_id not in self._telegram_signor_owner_ids(message):
+            decision = "rejected_owner_mismatch"
+        elif not self._telegram_has_exact_signor_topic(message, chat_id, topic_id):
+            decision = "rejected_topic_mismatch"
+
+        receipt = build_redacted_receipt(
+            chat_id=chat_id,
+            topic_id=topic_id,
+            message_id=message_id,
+            sender_class=sender_class,
+            is_bot=is_bot,
+            forwarded=forwarded,
+            decision=decision,
+        )
+        complete_identity = bool(chat_id and topic_id and message_id)
+        dedupe_key = (
+            f"telegram:{chat_id}:{topic_id}:{message_id}"
+            if complete_identity
+            else build_invalid_identity_key(
+                chat_id=chat_id,
+                topic_id=topic_id,
+                message_id=message_id,
+            )
+        )
+        try:
+            first_seen = self._telegram_ingress_store().record_once(dedupe_key, receipt)
+        except Exception:
+            logger.error("[Telegram] Signor Rivendita ingress receipt unavailable; rejecting")
+            return False
+        if not first_seen:
+            logger.warning("[Telegram] Signor Rivendita ingress rejected: replay")
+            return False
+        if not complete_identity:
+            logger.warning("[Telegram] Signor Rivendita ingress rejected: %s", decision)
+            return False
+        if decision != "accepted":
+            logger.warning("[Telegram] Signor Rivendita ingress rejected: %s", decision)
+            return False
+        return True
+
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
         if not metadata:
@@ -8396,6 +8571,8 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        if not self._admit_signor_rivendita_ingress(msg):
+            return
         # Early user-level auth check: reject unauthorized users before any
         # text batching, observe-buffer persistence, event building, or response
         # generation. This prevents removed/blocked users from injecting prompts
@@ -8424,6 +8601,8 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        if not self._admit_signor_rivendita_ingress(msg):
+            return
         if not self._should_process_message(msg, is_command=True):
             return
         if not self._is_user_authorized_from_message(msg):
@@ -8445,6 +8624,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
         if not msg:
+            return
+        if not self._admit_signor_rivendita_ingress(msg):
             return
         if not self._is_user_authorized_from_message(msg):
             logger.warning(
@@ -8649,6 +8830,8 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _handle_media_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming media messages, downloading images to local cache."""
         if not update.message:
+            return
+        if not self._admit_signor_rivendita_ingress(update.message):
             return
         if not self._is_user_authorized_from_message(update.message):
             logger.info(
