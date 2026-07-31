@@ -417,3 +417,129 @@ def convert_table_to_bullets(text: str) -> str:
         i += 1
 
     return '\n'.join(out)
+
+
+# ─── Discord Markdown Formatting ───────────────────────────────────────────
+
+_DISCORD_TABLE_MAX_WIDTH = 72
+_DISCORD_RICH_TABLE_TOKEN_RE = re.compile(
+    r"<(?:@!?|@&|#)\d+>|@(?:everyone|here)\b|:[A-Za-z0-9_]+:|[*_~`]"
+)
+
+
+def _split_discord_table_row(line: str) -> list[str]:
+    """Split a pipe row, preserving pipes escaped with a backslash."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith(r"\|"):
+        stripped = stripped[:-1]
+
+    cells = []
+    cell = []
+    index = 0
+    while index < len(stripped):
+        char = stripped[index]
+        if char == "\\" and index + 1 < len(stripped) and stripped[index + 1] == "|":
+            cell.append("|")
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(cell).strip())
+            cell = []
+        else:
+            cell.append(char)
+        index += 1
+    cells.append("".join(cell).strip())
+    return cells
+
+
+def _render_discord_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Render a valid table as a compact code block or rich-text-safe rows."""
+    all_cells = [*headers, *(cell for row in rows for cell in row)]
+    widths = [
+        max(len(row[column]) for row in [headers, *rows])
+        for column in range(len(headers))
+    ]
+    monospaced_width = sum(widths) + 2 * (len(widths) - 1)
+    rich_tokens = any(_DISCORD_RICH_TABLE_TOKEN_RE.search(cell) for cell in all_cells)
+
+    if len(headers) <= 3 and monospaced_width <= _DISCORD_TABLE_MAX_WIDTH and not rich_tokens:
+        lines = [
+            "  ".join(
+                cell.ljust(widths[index]) if index < len(widths) - 1 else cell
+                for index, cell in enumerate(row)
+            )
+            for row in [headers, *rows]
+        ]
+        return "```text\n" + "\n".join(lines) + "\n```"
+
+    return "\n".join(
+        " · ".join(
+            f"**{header}:** {cell}" if header else cell
+            for header, cell in zip(headers, row)
+        )
+        for row in rows
+    )
+
+
+def _collapse_redundant_discord_blank_lines(text: str) -> str:
+    """Keep one blank line between prose blocks without touching code fences."""
+    lines = text.split("\n")
+    out: list[str] = []
+    in_fence = False
+    prior_blank = False
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            prior_blank = False
+            out.append(line)
+        elif not in_fence and not line.strip():
+            if not prior_blank:
+                out.append(line)
+            prior_blank = True
+        else:
+            prior_blank = False
+            out.append(line)
+    return "\n".join(out)
+
+
+def format_discord_markdown(text: str) -> str:
+    """Make GFM tables readable in Discord without changing rich Markdown."""
+    if not text:
+        return text
+
+    lines = text.split("\n")
+    out: list[str] = []
+    in_fence = False
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            index += 1
+            continue
+        if (
+            not in_fence
+            and "|" in line
+            and index + 2 < len(lines)
+            and TABLE_SEPARATOR_RE.match(lines[index + 1])
+        ):
+            headers = _split_discord_table_row(line)
+            rows: list[list[str]] = []
+            cursor = index + 2
+            while cursor < len(lines) and is_table_row(lines[cursor]):
+                row = _split_discord_table_row(lines[cursor])
+                if len(row) != len(headers):
+                    break
+                rows.append(row)
+                cursor += 1
+            if len(headers) >= 2 and rows:
+                out.append(_render_discord_table(headers, rows))
+                index = cursor
+                continue
+        out.append(line)
+        index += 1
+
+    return _collapse_redundant_discord_blank_lines("\n".join(out))
