@@ -64,6 +64,12 @@ _DISCORD_MAX_APP_COMMANDS = 100
 _DISCORD_SELECT_FIELD_LIMIT = 100
 _DISCORD_BUTTON_LABEL_LIMIT = 80
 _DISCORD_ELLIPSIS = "\u2026"
+_HERMES_MAIL_APPROVAL_DIRECTIVE_RE = re.compile(
+    r"(?:\r?\n)?\[\[hermes_mail_approval:(mail-[a-f0-9]{20})\]\]\s*\Z"
+)
+_HERMES_MAIL_APPROVAL_COMPONENT_ID_RE = re.compile(
+    r"^hermes-mail-approval:(confirm|cancel):(mail-[a-f0-9]{20})$"
+)
 _DISCORD_NONCONVERSATIONAL_METADATA_KEYS = frozenset({
     "non_conversational",
     "non_conversational_history",
@@ -136,6 +142,75 @@ from gateway.platforms.base import (
     validate_inbound_media_size,
 )
 from tools.url_safety import is_safe_url
+
+
+def _extract_mail_approval_directive(message: str) -> tuple[str, Optional[str]]:
+    """Remove the bridge-only trailing directive and return its opaque request id."""
+    match = _HERMES_MAIL_APPROVAL_DIRECTIVE_RE.search(message)
+    if match is None:
+        return message, None
+    return message[:match.start()].rstrip(), match.group(1)
+
+
+def _mail_approval_components(request_id: str) -> list[dict[str, Any]]:
+    """Render the two fixed, persistent Discord buttons for one bridge record."""
+    return [{
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 3,
+                "label": "Sì, invia",
+                "custom_id": f"hermes-mail-approval:confirm:{request_id}",
+            },
+            {
+                "type": 2,
+                "style": 4,
+                "label": "No, annulla",
+                "custom_id": f"hermes-mail-approval:cancel:{request_id}",
+            },
+        ],
+    }]
+
+
+def _run_mail_approval_component(action: str, request_id: str) -> bool:
+    """Invoke the owner-configured bridge command without an agent or shell.
+
+    The command file is local operator configuration, not Discord content. Its
+    argv is validated and the opaque request id is separately constrained by
+    the dynamic component template above.
+    """
+    command_file = os.getenv("HERMES_MAIL_APPROVAL_COMMAND_FILE", "").strip()
+    if action not in {"confirm", "cancel"} or not _HERMES_MAIL_APPROVAL_COMPONENT_ID_RE.fullmatch(
+        f"hermes-mail-approval:{action}:{request_id}"
+    ):
+        return False
+    try:
+        path = _Path(command_file)
+        if not path.is_absolute():
+            return False
+        command = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(command, list)
+            or not command
+            or len(command) > 32
+            or not all(isinstance(value, str) and value and len(value) <= 4096 for value in command)
+            or not _Path(command[0]).is_absolute()
+        ):
+            return False
+        completed = subprocess.run(
+            [*command, "--approval-action", action, "--request-id", request_id],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        if completed.returncode != 0:
+            return False
+        result = json.loads(completed.stdout)
+        return bool(isinstance(result, dict) and result.get("ok") is True)
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        return False
 
 
 async def _read_url_image_with_redirect_guard(
@@ -1201,6 +1276,12 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 # Resolve any usernames in the allowed list to numeric IDs
                 await adapter_self._resolve_allowed_usernames()
+                if hasattr(discord.ui, "DynamicItem"):
+                    MailApprovalActionButton.configure(
+                        adapter_self._allowed_user_ids,
+                        adapter_self._allowed_role_ids,
+                    )
+                    adapter_self._client.add_dynamic_items(MailApprovalActionButton)
                 adapter_self._ready_event.set()
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
@@ -7827,7 +7908,7 @@ def _define_discord_view_classes() -> None:
     lazy install sets DISCORD_AVAILABLE=True but leaves the classes
     undefined, causing NameError on the first button interaction.
     """
-    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, ChoicePickerView
+    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, ChoicePickerView, MailApprovalActionButton
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -8859,6 +8940,82 @@ def _define_discord_view_classes() -> None:
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
+
+    if hasattr(discord.ui, "DynamicItem"):
+        _DiscordDynamicItem = discord.ui.DynamicItem
+    else:  # lightweight Discord test doubles do not model persistent items
+        class _DiscordDynamicItem:
+            @classmethod
+            def __class_getitem__(cls, _item_type):
+                return cls
+
+            def __init_subclass__(cls, **_kwargs):
+                return super().__init_subclass__()
+
+            def __init__(self, item):
+                self.item = item
+
+    class MailApprovalActionButton(
+        _DiscordDynamicItem[discord.ui.Button],
+        template=_HERMES_MAIL_APPROVAL_COMPONENT_ID_RE,
+    ):
+        """Persistent native action for a bridge-owned pending email.
+
+        The payload never enters the custom id. The bridge re-reads its own
+        state and performs the same expiry, identity, digest and one-time
+        checks as its MCP path.
+        """
+
+        _allowed_user_ids: set = set()
+        _allowed_role_ids: set = set()
+
+        def __init__(self, action: str, request_id: str):
+            self.action = action
+            self.request_id = request_id
+            button = discord.ui.Button(
+                label="Sì, invia" if action == "confirm" else "No, annulla",
+                style=discord.ButtonStyle.success if action == "confirm" else discord.ButtonStyle.danger,
+                custom_id=f"hermes-mail-approval:{action}:{request_id}",
+            )
+            super().__init__(button)
+
+        @classmethod
+        def configure(cls, allowed_user_ids: set, allowed_role_ids: set) -> None:
+            cls._allowed_user_ids = set(allowed_user_ids)
+            cls._allowed_role_ids = set(allowed_role_ids)
+
+        @classmethod
+        async def from_custom_id(cls, interaction, item, match):
+            return cls(match.group(1), match.group(2))
+
+        async def interaction_check(self, interaction) -> bool:
+            if _component_check_auth(
+                interaction, self._allowed_user_ids, self._allowed_role_ids,
+            ):
+                return True
+            await interaction.response.send_message(
+                "Non sei autorizzato a confermare questa email.", ephemeral=True,
+            )
+            return False
+
+        async def callback(self, interaction) -> None:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            accepted = await asyncio.to_thread(
+                _run_mail_approval_component, self.action, self.request_id,
+            )
+            if not accepted:
+                await interaction.followup.send(
+                    "Questa bozza non è più disponibile: potrebbe essere scaduta, già elaborata o momentaneamente non raggiungibile.",
+                    ephemeral=True,
+                )
+                return
+            try:
+                if interaction.message is not None:
+                    await interaction.message.edit(view=None)
+            except Exception:
+                logger.debug("Could not remove completed mail-approval buttons", exc_info=True)
+            outcome = "✅ Email inviata." if self.action == "confirm" else "🛑 Invio annullato."
+            await interaction.followup.send(outcome, ephemeral=True)
 if DISCORD_AVAILABLE:
     _define_discord_view_classes()
 
@@ -9034,6 +9191,12 @@ async def _standalone_send(
         auth_headers = {"Authorization": f"Bot {token}"}
         json_headers = {**auth_headers, "Content-Type": "application/json"}
         media_files = media_files or []
+        message, approval_request_id = _extract_mail_approval_directive(message)
+        approval_components = (
+            _mail_approval_components(approval_request_id)
+            if approval_request_id is not None
+            else None
+        )
         last_data = None
         warnings = []
 
@@ -9135,7 +9298,10 @@ async def _standalone_send(
                             headers=json_headers,
                             json={
                                 "name": thread_name,
-                                "message": {"content": message},
+                                "message": {
+                                    "content": message,
+                                    **({"components": approval_components} if approval_components else {}),
+                                },
                             },
                             **_req_kw,
                         ) as resp:
@@ -9168,7 +9334,10 @@ async def _standalone_send(
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
             # Send text message (skip if empty and media is present)
             if message.strip() or not media_files:
-                async with session.post(url, headers=json_headers, json={"content": message}, **_req_kw) as resp:
+                payload = {"content": message}
+                if approval_components:
+                    payload["components"] = approval_components
+                async with session.post(url, headers=json_headers, json=payload, **_req_kw) as resp:
                     if resp.status not in {200, 201}:
                         body = await _standalone_read_text_limited(
                             resp,

@@ -28,6 +28,8 @@ if _repo not in sys.path:
 from plugins.platforms.discord.adapter import (  # noqa: E402
     ClarifyChoiceView,
     DiscordAdapter,
+    _extract_mail_approval_directive,
+    _mail_approval_components,
 )
 from gateway.config import PlatformConfig  # noqa: E402
 from gateway.platforms.base import utf16_len  # noqa: E402
@@ -76,6 +78,23 @@ def _make_interaction(*, user_id="42", display_name="Tester", roles=None,
     else:
         message = None
     return SimpleNamespace(user=user, response=response, message=message)
+
+
+def test_mail_approval_directive_is_removed_and_has_only_opaque_component_ids():
+    request_id = "mail-0123456789abcdef0123"
+    content, extracted = _extract_mail_approval_directive(
+        f"Visible preview\n[[hermes_mail_approval:{request_id}]]"
+    )
+    assert content == "Visible preview"
+    assert extracted == request_id
+    components = _mail_approval_components(request_id)
+    buttons = components[0]["components"]
+    assert [button["label"] for button in buttons] == ["Sì, invia", "No, annulla"]
+    assert [button["custom_id"] for button in buttons] == [
+        f"hermes-mail-approval:confirm:{request_id}",
+        f"hermes-mail-approval:cancel:{request_id}",
+    ]
+    assert all("Visible preview" not in button["custom_id"] for button in buttons)
 
 
 # ===========================================================================
