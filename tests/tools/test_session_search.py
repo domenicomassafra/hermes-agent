@@ -30,6 +30,21 @@ def db(tmp_path):
     return SessionDB(tmp_path / "state.db")
 
 
+def test_signor_rivendita_rejects_unbound_history_discovery(monkeypatch, db):
+    """A current-scan answer cannot retrieve an old product by broad history."""
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "signorrivendita")
+    payload = json.loads(session_search(query="Bar Nanni", db=db))
+    assert payload["success"] is False
+    assert "unbound session history" in payload["error"].lower()
+
+
+def test_signor_rivendita_allows_explicit_historical_session(monkeypatch, db):
+    monkeypatch.setenv("HERMES_PROFILE_NAME", "signorrivendita")
+    db.create_session("historical-run", source="cli")
+    payload = json.loads(session_search(session_id="historical-run", db=db))
+    assert payload["success"] is True
+
+
 def _seed_modpack_sessions(db):
     """Create three sessions about a modpack so FTS5 has hits to dedupe."""
     now = int(time.time())

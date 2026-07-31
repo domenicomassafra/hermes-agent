@@ -31,6 +31,7 @@ support.
 
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional, Union
 
 # Sources that are excluded from session browsing/searching by default.
@@ -830,6 +831,19 @@ def session_search(
     ``@session:<profile>/<id>`` link). Scroll wins over read/discovery when an
     anchor is set — the agent has asked for a specific slice.
     """
+    # Signor Rivendita current-scan answers must be grounded in the current
+    # scheduler receipt. A broad history search can surface a similarly named
+    # historical product and be misrepresented as a current scan result.
+    # Explicit session IDs remain available for an owner-requested historical
+    # investigation, but discovery/browse is rejected at this profile boundary.
+    if os.getenv("HERMES_PROFILE_NAME", "").strip().lower() == "signorrivendita" and not (
+        isinstance(session_id, str) and session_id.strip()
+    ):
+        return tool_error(
+            "Signor Rivendita current scan cannot use unbound session history; provide an explicit session ID and label it historical.",
+            success=False,
+        )
+
     if db is None:
         try:
             from hermes_state import SessionDB
