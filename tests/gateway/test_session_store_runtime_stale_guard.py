@@ -176,6 +176,7 @@ class TestRuntimeStaleGuard:
         # A fresh session row was created for the new session_id.
         db.create_session.assert_called_once()
         assert store._entries[key].session_id == result.session_id
+        assert result.was_auto_reset is False
 
     def test_live_entry_returned_unchanged(self, tmp_path):
         """A session still alive in the DB is returned as-is (no churn)."""
@@ -206,6 +207,7 @@ class TestRuntimeStaleGuard:
         # Did not return the stale (suspended) entry; created a fresh session.
         assert result.session_id != "sid_stale"
         db.create_session.assert_called_once()
+        assert result.was_auto_reset is False
 
     def test_force_new_skips_stale_check(self, tmp_path):
         """force_new short-circuits the whole existing-entry branch; the stale
@@ -260,9 +262,9 @@ class TestRuntimeStaleGuard:
 
         # Fresh session — NOT the stale session_id.
         assert result.session_id != "sid_stale"
-        # Auto-reset metadata is set.
-        assert result.was_auto_reset is True
-        assert result.auto_reset_reason == "idle"
+        # Stale-route repair is internal; it must not cause a reset notice.
+        assert result.was_auto_reset is False
+        assert result.auto_reset_reason is None
         # reopen_session must NOT have been called (we skipped recovery).
         db.reopen_session.assert_not_called()
         # A brand-new session row was created.
