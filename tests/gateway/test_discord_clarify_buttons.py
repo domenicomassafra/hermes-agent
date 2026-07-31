@@ -11,10 +11,11 @@ dispatcher like Telegram — the auth + resolution path is the same:
   · already-resolved or unauthorized → ephemeral "this prompt..." reply
 """
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -30,6 +31,7 @@ from plugins.platforms.discord.adapter import (  # noqa: E402
     DiscordAdapter,
     _extract_mail_approval_directive,
     _mail_approval_components,
+    _run_mail_approval_component,
 )
 from gateway.config import PlatformConfig  # noqa: E402
 from gateway.platforms.base import utf16_len  # noqa: E402
@@ -95,6 +97,22 @@ def test_mail_approval_directive_is_removed_and_has_only_opaque_component_ids():
         f"hermes-mail-approval:cancel:{request_id}",
     ]
     assert all("Visible preview" not in button["custom_id"] for button in buttons)
+
+
+def test_mail_approval_action_uses_only_the_local_command_file(tmp_path, monkeypatch):
+    command_file = tmp_path / "approval-command.json"
+    command_file.write_text(json.dumps(["/usr/bin/python3", "/opt/bridge/server.py"]))
+    monkeypatch.setenv("HERMES_MAIL_APPROVAL_COMMAND_FILE", str(command_file))
+    request_id = "mail-0123456789abcdef0123"
+    completed = SimpleNamespace(returncode=0, stdout='{"ok":true}')
+    with patch("plugins.platforms.discord.adapter.subprocess.run", return_value=completed) as run:
+        assert _run_mail_approval_component("confirm", request_id) is True
+    assert run.call_args.args[0] == [
+        "/usr/bin/python3", "/opt/bridge/server.py",
+        "--approval-action", "confirm", "--request-id", request_id,
+    ]
+    assert run.call_args.kwargs["check"] is False
+    assert "shell" not in run.call_args.kwargs
 
 
 # ===========================================================================
