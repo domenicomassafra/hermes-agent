@@ -1,6 +1,7 @@
 """Tests for GatewayStreamConsumer — media directive stripping in streaming."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2680,3 +2681,196 @@ class TestFlushPendingSync:
         # The finally net should have drained + signaled the queued barrier.
         flushed = await flush_done
         assert flushed is True
+
+
+# ── Interim-commentary flood guard ────────────────────────────────────────
+# Regression coverage for the 2026-07-31 Signor Rivendita incident: a stuck
+# Notion-write retry loop narrated its own raw tool-error JSON payloads as
+# "commentary" once per iteration, flooding the Telegram DM with dozens of
+# enormous messages before the owner sent /stop. Two independent guards are
+# covered here: (1) a content filter that drops commentary which is itself a
+# raw JSON/tool-payload dump, and (2) a hard cap on how many commentary
+# messages a single run() can deliver, regardless of content.
+
+
+class TestLooksLikeRawPayloadDump:
+    """Unit tests for the raw-payload content guard."""
+
+    def test_plain_narration_is_not_flagged(self):
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump(
+            "I'll check the Notion database now."
+        ) is False
+
+    def test_short_json_is_not_flagged(self):
+        # Below _COMMENTARY_PAYLOAD_MIN_CHARS — narration may legitimately
+        # quote a short id or field without being a payload dump.
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump(
+            '{"ok": true}'
+        ) is False
+
+    def test_large_json_object_is_flagged(self):
+        payload = json.dumps({
+            "error": "ConflictError",
+            "message": "property 'Venditore' has no existing option 'RENDEREX LTD'",
+            "schema_version": "signor-rivendita-wishlist-write-receipt.v1",
+            "status": "blocked",
+            "detail": "x" * 200,
+        })
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump(payload) is True
+
+    def test_large_json_array_is_flagged(self):
+        payload = json.dumps([{"item": i, "note": "x" * 40} for i in range(20)])
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump(payload) is True
+
+    def test_fenced_json_only_block_is_flagged(self):
+        payload = json.dumps({"error": "ConflictError", "detail": "y" * 250})
+        text = f"```json\n{payload}\n```"
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump(text) is True
+
+    def test_fenced_json_with_surrounding_prose_is_not_flagged(self):
+        # A model explaining a payload alongside real narration is legitimate
+        # — only an *entirely* fenced-payload message is suppressed.
+        payload = json.dumps({"error": "ConflictError", "detail": "y" * 250})
+        text = f"Here's what failed:\n```json\n{payload}\n```\nRetrying with a new key."
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump(text) is False
+
+    def test_long_prose_that_is_not_json_is_not_flagged(self):
+        prose = "Still working through the Notion conflict. " * 10
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump(prose) is False
+
+    def test_empty_text_is_not_flagged(self):
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump("") is False
+        assert GatewayStreamConsumer._looks_like_raw_payload_dump("   ") is False
+
+
+class TestSendCommentaryPayloadGuard:
+    """_send_commentary must drop raw payload dumps before they reach the adapter."""
+
+    @pytest.mark.asyncio
+    async def test_raw_json_payload_is_dropped(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="m1"))
+        consumer = GatewayStreamConsumer(adapter, "chat_123")
+
+        payload = json.dumps({
+            "error": "ConflictError",
+            "message": "Shop candidate pool exceeds bounded replay limit",
+            "schema_version": "signor-rivendita-wishlist-write-receipt.v1",
+            "status": "blocked",
+            "padding": "z" * 300,
+        })
+
+        sent = await consumer._send_commentary(payload)
+
+        assert sent is False
+        adapter.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_normal_commentary_still_delivered(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="m1"))
+        consumer = GatewayStreamConsumer(adapter, "chat_123")
+
+        sent = await consumer._send_commentary("Using the terminal tool now.")
+
+        assert sent is True
+        adapter.send.assert_called_once()
+        assert consumer._commentary_count == 1
+
+
+class TestCommentaryMessageBudget:
+    """_send_commentary must bound the number of platform messages a single
+    run() can emit as interim commentary, independent of content."""
+
+    @pytest.mark.asyncio
+    async def test_budget_caps_commentary_and_final_still_sends(self):
+        adapter = MagicMock()
+        sent = []
+
+        async def _send(*args, **kwargs):
+            sent.append(kwargs.get("content", ""))
+            return SimpleNamespace(success=True, message_id=f"m{len(sent)}")
+
+        adapter.send = AsyncMock(side_effect=_send)
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, max_commentary_messages=3,
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        # Simulate a stuck tool-retry loop: 9 narration turns, far more than
+        # the budget of 3, followed by a final answer.
+        for i in range(9):
+            consumer.on_commentary(f"Retrying step {i}...")
+        consumer.on_delta("Done — resolved the conflict.")
+        consumer.finish()
+
+        await consumer.run()
+
+        # At most budget (3) real commentary messages + 1 "hidden" notice.
+        commentary_like = [s for s in sent if s.startswith("Retrying step")]
+        assert len(commentary_like) == 3
+        assert any("still working" in s for s in sent)
+        # The final response must still go through — the budget only bounds
+        # interim commentary, never the answer itself.
+        assert consumer.final_response_sent is True
+        assert sent[-1] == "Done — resolved the conflict."
+        # Fan-out is bounded: 3 commentary + 1 notice + 1 final = 5, not 9+.
+        assert len(sent) == 5
+
+    @pytest.mark.asyncio
+    async def test_budget_zero_disables_cap_legacy_behavior(self):
+        adapter = MagicMock()
+        sent = []
+
+        async def _send(*args, **kwargs):
+            sent.append(kwargs.get("content", ""))
+            return SimpleNamespace(success=True, message_id=f"m{len(sent)}")
+
+        adapter.send = AsyncMock(side_effect=_send)
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(
+            edit_interval=0.01, buffer_threshold=5, max_commentary_messages=0,
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        for i in range(5):
+            consumer.on_commentary(f"Step {i}...")
+        consumer.finish()
+
+        await consumer.run()
+
+        commentary_like = [s for s in sent if s.startswith("Step")]
+        assert len(commentary_like) == 5
+
+    @pytest.mark.asyncio
+    async def test_default_budget_does_not_affect_typical_single_commentary_turn(self):
+        """A normal turn with one or two commentary updates (the common case)
+        must be completely unaffected by the default budget."""
+        adapter = MagicMock()
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_1"),
+            SimpleNamespace(success=True, message_id="msg_2"),
+        ])
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(
+            adapter,
+            "chat_123",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5),
+        )
+
+        consumer.on_commentary("I'll inspect the repository first.")
+        consumer.on_delta("Done.")
+        consumer.finish()
+
+        await consumer.run()
+
+        sent_texts = [call[1]["content"] for call in adapter.send.call_args_list]
+        assert sent_texts == ["I'll inspect the repository first.", "Done."]
+        assert consumer.final_response_sent is True

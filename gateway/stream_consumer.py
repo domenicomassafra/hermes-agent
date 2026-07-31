@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import queue
 import re
@@ -152,6 +153,18 @@ class StreamConsumerConfig:
     # "group", "supergroup", "forum").  Used to gate native draft streaming,
     # which is platform-specific (Telegram drafts are DM-only).
     chat_type: str = ""
+    # Bounds the number of interim commentary messages (on_commentary /
+    # _send_commentary) a single run() lifetime will deliver to the
+    # platform.  A stuck agentic turn (repeated tool-call failures, long
+    # retry loops) narrates once per iteration; without a cap each of those
+    # narrations becomes its own platform message and a multi-minute loop
+    # can flood the chat with dozens of messages.  0 disables the cap
+    # (legacy/unbounded behavior).  The final response is never subject to
+    # this budget — only interim commentary sent while tools are still
+    # running.  See owner report: Signor Rivendita Telegram DM flooded with
+    # dozens of raw tool-loop narration messages during a long Notion-write
+    # retry loop (2026-07-31).
+    max_commentary_messages: int = 6
 
 
 class GatewayStreamConsumer:
@@ -172,6 +185,15 @@ class GatewayStreamConsumer:
     # After this many consecutive flood-control failures, permanently disable
     # progressive edits for the remainder of the stream.
     _MAX_FLOOD_STRIKES = 3
+
+    # Interim commentary is meant to be short, human-facing narration (e.g.
+    # "Using browser tool..."). A raw tool payload or error dump that a model
+    # echoes verbatim into its commentary text is neither short nor
+    # human-facing and must never reach the platform — see
+    # _looks_like_raw_payload_dump(). Text shorter than this is passed
+    # through unfiltered so ordinary narration is never blocked (kept well
+    # below typical narration length; only catches large structured dumps).
+    _COMMENTARY_PAYLOAD_MIN_CHARS = 200
 
     # Reasoning/thinking tags that models emit inline in content.
     # Must stay in sync with cli.py _OPEN_TAGS/_CLOSE_TAGS and
@@ -302,6 +324,13 @@ class GatewayStreamConsumer:
         # this response and route through edit-based for graceful degradation.
         self._draft_failures = 0
         self._before_finalize_notified = False
+
+        # Interim-commentary flood guard (see StreamConsumerConfig.
+        # max_commentary_messages).  Counts commentary messages actually
+        # delivered to the platform during this run(); the final response
+        # is delivered through a separate path and is never counted here.
+        self._commentary_count = 0
+        self._commentary_budget_notice_sent = False
 
     def _metadata_for_send(
         self,
@@ -1124,6 +1153,59 @@ class GatewayStreamConsumer:
         """
         return _BasePlatformAdapter.strip_media_directives_for_display(text)
 
+    # ── Interim-commentary payload guard ─────────────────────────────
+    # ``on_commentary``/``_send_commentary`` carry model-authored narration
+    # text (e.g. "Using browser tool..."), not structured tool output — but
+    # nothing upstream stops a model from echoing a raw tool result/error
+    # payload verbatim as its "narration" when it is reasoning out loud
+    # about a failure (observed: a Notion-write retry loop narrated each
+    # ConflictError JSON body it received, producing one platform message
+    # per iteration). This is a best-effort content guard, independent of
+    # the message-count budget in _send_commentary: it catches payload-like
+    # text even within budget.
+    @staticmethod
+    def _looks_like_raw_payload_dump(text: str) -> bool:
+        """Return True when *text* is itself a raw structured payload
+        (JSON object/array, or a fenced code block whose contents are JSON)
+        rather than human-facing narration.
+
+        Deliberately conservative — a false positive silently drops one
+        commentary update (harmless; the final response is unaffected), so
+        this only flags text that *parses* as JSON, not text that merely
+        mentions or quotes a fragment of one.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return False
+
+        def _is_json_blob(candidate: str) -> bool:
+            candidate = candidate.strip()
+            if len(candidate) < GatewayStreamConsumer._COMMENTARY_PAYLOAD_MIN_CHARS:
+                return False
+            if candidate[0] not in "{[" or candidate[-1] not in "}]":
+                return False
+            try:
+                json.loads(candidate)
+            except (ValueError, TypeError):
+                return False
+            return True
+
+        if _is_json_blob(stripped):
+            return True
+
+        # A commentary message that is *entirely* one or more fenced code
+        # blocks (no surrounding prose) whose combined fenced content is a
+        # JSON blob is the same failure mode wrapped in markdown — e.g. a
+        # model narrating "```json\n{...raw tool result...}\n```" with no
+        # other text.
+        fence_matches = re.findall(r"```[a-zA-Z0-9_+-]*\n(.*?)```", stripped, flags=re.DOTALL)
+        if fence_matches:
+            non_fence_text = re.sub(r"```[a-zA-Z0-9_+-]*\n.*?```", "", stripped, flags=re.DOTALL).strip()
+            if not non_fence_text and any(_is_json_blob(block) for block in fence_matches):
+                return True
+
+        return False
+
     async def _send_new_chunk(
         self,
         text: str,
@@ -1693,6 +1775,44 @@ class GatewayStreamConsumer:
         text = self._clean_for_display(text)
         if not text.strip():
             return False
+
+        # Drop raw tool/error payloads a model narrated verbatim instead of
+        # summarizing — these are internal execution detail, never a
+        # user-facing answer. Silent drop: the turn continues normally and
+        # the eventual final response is unaffected.
+        if self._looks_like_raw_payload_dump(text):
+            logger.debug(
+                "Suppressing commentary that looks like a raw payload dump (%d chars)",
+                len(text),
+            )
+            return False
+
+        # Bound the number of interim commentary messages a single run can
+        # emit. A stuck tool-retry loop narrates once per iteration; without
+        # this cap a multi-minute loop floods the chat with one message per
+        # iteration. The final response is delivered through a separate path
+        # (_send_or_edit / _try_fresh_final) and is never subject to this
+        # budget.
+        _budget = self.cfg.max_commentary_messages
+        if _budget and self._commentary_count >= _budget:
+            if not self._commentary_budget_notice_sent:
+                self._commentary_budget_notice_sent = True
+                notice = (
+                    "_(further progress updates for this turn are hidden — "
+                    "still working…)_"
+                )
+                try:
+                    result = await self.adapter.send(
+                        chat_id=self.chat_id,
+                        content=notice,
+                        metadata=self.metadata,
+                    )
+                    if result.success:
+                        self._notify_new_message()
+                except Exception as e:
+                    logger.error("Commentary budget notice send error: %s", e)
+            return False
+
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
@@ -1713,6 +1833,7 @@ class GatewayStreamConsumer:
                 # an interim "preview" actually carried the final response, vs.
                 # unrelated commentary delivered during a session split (#14238).
                 self._delivered_commentary_texts.append(text)
+                self._commentary_count += 1
             return result.success
         except Exception as e:
             logger.error("Commentary send error: %s", e)
