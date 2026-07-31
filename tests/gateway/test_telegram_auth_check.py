@@ -47,6 +47,9 @@ def _make_adapter(allow_from=None, allowed_chats=None, group_allowed_chats=None,
     adapter._forum_command_registered = set()
     adapter._active_sessions = {}
     adapter._pending_messages = {}
+    adapter._dm_topics = {}
+    adapter._dm_topics_config = []
+    adapter._dm_topic_chat_ids = set()
     if callback_auth is not None:
         adapter._is_callback_user_authorized = callback_auth
     return adapter
@@ -504,6 +507,28 @@ async def test_signor_replay_persists_across_adapter_restart(tmp_path):
 async def test_signor_direct_owner_in_exact_topic_is_processed(tmp_path):
     adapter = _make_signor_rivendita_adapter(tmp_path)
     direct_owner = _make_message(chat_id=-100, chat_type="supergroup", topic_id=15, message_id=88)
+
+    await adapter._handle_text_message(_signor_update(direct_owner), SimpleNamespace())
+
+    adapter._enqueue_text_event.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_signor_direct_owner_uses_existing_scout_topic_binding(tmp_path, monkeypatch):
+    """The existing worker topic may bind the owner's direct-message lane."""
+    monkeypatch.setenv("TELEGRAM_SIGNOR_RIVENDITA_TOPIC_ID", "15")
+    adapter = _make_adapter(
+        profile_name="signorrivendita",
+        allow_from=["111"],
+        require_mention=False,
+    )
+    adapter._signor_rivendita_ingress_store = TelegramIngressReceiptStore(
+        tmp_path / "state" / "telegram_ingress_receipts.sqlite3"
+    )
+    adapter._enqueue_text_event = Mock()
+    direct_owner = _make_message(
+        chat_id=111, chat_type="private", topic_id=15, message_id=91
+    )
 
     await adapter._handle_text_message(_signor_update(direct_owner), SimpleNamespace())
 
