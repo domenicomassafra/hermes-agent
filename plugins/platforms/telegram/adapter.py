@@ -1149,14 +1149,22 @@ class TelegramAdapter(BasePlatformAdapter):
     def _telegram_has_exact_signor_topic(self, message: Message, chat_id: str, topic_id: str) -> bool:
         """Require a configured exact chat/topic binding for Signor Rivendita."""
         exact = f"{chat_id}:{topic_id}"
-        configured_direct_topic = self._telegram_positive_id(
-            os.getenv("TELEGRAM_SIGNOR_RIVENDITA_TOPIC_ID", "")
-        )
+        configured_direct_topics = {
+            normalized
+            for key in (
+                "TELEGRAM_SCAN_TOPIC_ID",
+                "TELEGRAM_PERSONAL_TOPIC_ID",
+                "TELEGRAM_INSERTIONS_TOPIC_ID",
+                "TELEGRAM_SIGNOR_RIVENDITA_TOPIC_ID",
+            )
+            if (normalized := self._telegram_positive_id(os.getenv(key, "")))
+        }
         source = self._source_from_message_for_auth(message)
-        if configured_direct_topic == topic_id:
-            # The scheduled worker already owns this explicit environment
-            # binding. It is only a safe ingress binding in the owner's direct
-            # chat: a topic number alone is not globally unique across groups.
+        if topic_id in configured_direct_topics:
+            # The scheduled worker already owns these explicit environment
+            # bindings. They are only safe ingress bindings in the owner's
+            # direct chat: a topic number alone is not globally unique across
+            # groups.
             return source.chat_type == "dm" and source.chat_id == source.user_id == chat_id
         if exact in self._telegram_free_response_topics():
             return True

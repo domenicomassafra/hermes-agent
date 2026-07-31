@@ -515,8 +515,8 @@ async def test_signor_direct_owner_in_exact_topic_is_processed(tmp_path):
 
 @pytest.mark.asyncio
 async def test_signor_direct_owner_uses_existing_scout_topic_binding(tmp_path, monkeypatch):
-    """The existing worker topic may bind the owner's direct-message lane."""
-    monkeypatch.setenv("TELEGRAM_SIGNOR_RIVENDITA_TOPIC_ID", "15")
+    """The existing worker Scan topic may bind the owner's direct-message lane."""
+    monkeypatch.setenv("TELEGRAM_SCAN_TOPIC_ID", "15")
     adapter = _make_adapter(
         profile_name="signorrivendita",
         allow_from=["111"],
