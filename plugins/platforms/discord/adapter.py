@@ -5849,6 +5849,23 @@ class DiscordAdapter(BasePlatformAdapter):
             return {part.strip() for part in s.split(",") if part.strip()}
         return set()
 
+    def _discord_auto_thread_channels(self) -> set | None:
+        """Return the optional allowlist for Discord auto-thread creation.
+
+        When unset, retain the historical ``discord.auto_thread`` behavior for
+        every eligible text channel. Once configured, only matching channel
+        IDs/names (or ``"*"``) may create a thread; an explicitly empty value
+        disables auto-thread creation without changing other message routing.
+        """
+        raw = self.config.extra.get("auto_thread_channels")
+        if raw is None:
+            raw = os.getenv("DISCORD_AUTO_THREAD_CHANNELS")
+        if raw is None:
+            return None
+        if isinstance(raw, list):
+            return {str(part).strip() for part in raw if str(part).strip()}
+        return {part.strip() for part in str(raw).split(",") if part.strip()}
+
     def _raw_mentioned_user_ids(self, message: Any) -> set:
         """Extract Discord user-mention IDs directly from raw message content.
 
@@ -7290,17 +7307,30 @@ class DiscordAdapter(BasePlatformAdapter):
                 if not self._self_is_explicitly_mentioned(message) and not mention_prefix:
                     return False
         # Auto-thread: when enabled, automatically create a thread for every
-        # @mention in a text channel so each conversation is isolated (like Slack).
-        # Messages already inside threads or DMs are unaffected.
-        # no_thread_channels: channels where bot responds directly without thread.
+        # eligible @mention in a text channel so each conversation is isolated
+        # (like Slack). ``auto_thread_channels`` narrows that behavior to an
+        # explicit allowlist when configured. Messages already inside threads
+        # or DMs are unaffected; no_thread_channels remain inline.
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
             skip_thread = bool(channel_keys & no_thread_channels) or is_free_channel
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
+            auto_thread_channels = self._discord_auto_thread_channels()
+            is_auto_thread_channel = (
+                auto_thread_channels is None
+                or "*" in auto_thread_channels
+                or bool(channel_keys & auto_thread_channels)
+            )
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
-            if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
+            if (
+                auto_thread
+                and is_auto_thread_channel
+                and not skip_thread
+                and not is_voice_linked_channel
+                and not is_reply_message
+            ):
                 thread = await self._auto_create_thread(message)
                 if thread:
                     parent_channel_id = str(message.channel.id)
@@ -9526,7 +9556,8 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     The DiscordAdapter reads its runtime configuration via ``os.getenv()``
     throughout the connect / handle code paths (``DISCORD_ALLOWED_USERS``,
     ``DISCORD_REQUIRE_MENTION``, ``DISCORD_FREE_RESPONSE_CHANNELS``,
-    ``DISCORD_AUTO_THREAD``, ``DISCORD_REACTIONS``,
+    ``DISCORD_AUTO_THREAD``, ``DISCORD_AUTO_THREAD_CHANNELS``,
+    ``DISCORD_REACTIONS``,
     ``DISCORD_IGNORED_CHANNELS``, ``DISCORD_ALLOWED_CHANNELS``,
     ``DISCORD_NO_THREAD_CHANNELS``, ``DISCORD_HISTORY_BACKFILL``,
     ``DISCORD_HISTORY_BACKFILL_LIMIT``, ``DISCORD_ALLOW_MENTION_*``,
@@ -9577,6 +9608,11 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
     if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
         os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
+    atc = discord_cfg.get("auto_thread_channels")
+    if atc is not None and not os.getenv("DISCORD_AUTO_THREAD_CHANNELS"):
+        if isinstance(atc, list):
+            atc = ",".join(str(v) for v in atc)
+        os.environ["DISCORD_AUTO_THREAD_CHANNELS"] = str(atc)
     if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
         os.environ["DISCORD_REACTIONS"] = str(discord_cfg["reactions"]).lower()
     seeded_extra = {}
@@ -9703,7 +9739,7 @@ def register(ctx) -> None:
         setup_fn=interactive_setup,
         # YAML→env config bridge — owns the translation of ``config.yaml``
         # ``discord:`` keys (require_mention, free_response_channels,
-        # auto_thread, reactions, ignored_channels, allowed_channels,
+        # auto_thread, auto_thread_channels, reactions, ignored_channels, allowed_channels,
         # no_thread_channels, allow_mentions.*, reply_to_mode,
         # thread_require_mention) into ``DISCORD_*`` env vars that the
         # adapter reads via ``os.getenv()``.  Replaces the hardcoded block

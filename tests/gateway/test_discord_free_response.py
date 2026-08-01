@@ -1,5 +1,6 @@
 """Tests for Discord free-response defaults and mention gating."""
 
+import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -48,7 +49,7 @@ def _ensure_discord_mock():
 _ensure_discord_mock()
 
 import plugins.platforms.discord.adapter as discord_platform  # noqa: E402
-from plugins.platforms.discord.adapter import DiscordAdapter  # noqa: E402
+from plugins.platforms.discord.adapter import DiscordAdapter, _apply_yaml_config  # noqa: E402
 
 
 class FakeDMChannel:
@@ -110,6 +111,7 @@ def adapter(monkeypatch):
         "DISCORD_THREAD_REQUIRE_MENTION",
         "DISCORD_FREE_RESPONSE_CHANNELS",
         "DISCORD_AUTO_THREAD",
+        "DISCORD_AUTO_THREAD_CHANNELS",
         "DISCORD_NO_THREAD_CHANNELS",
         "DISCORD_ALLOWED_CHANNELS",
         "DISCORD_IGNORED_CHANNELS",
@@ -450,6 +452,58 @@ async def test_discord_auto_thread_enabled_by_default(adapter, monkeypatch):
     event = adapter.handle_message.await_args.args[0]
     assert event.source.chat_type == "thread"
     assert event.source.thread_id == "999"
+
+
+@pytest.mark.parametrize(
+    ("profile", "general_id", "chat_id"),
+    [
+        ("default", "1532435346619629570", "1532453597344956467"),
+        ("signorstudio", "1532436901288608028", "1532453678093566033"),
+        ("signorfitness", "1532436311821123667", "1532453693255843981"),
+        ("signorpsicologo", "1532435887143649328", "1532453710679244892"),
+        ("signorrivendita-compatible", "1532436634602311796", "1532453728014303476"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_discord_auto_thread_channels_only_threads_configured_chat(
+    adapter, monkeypatch, profile, general_id, chat_id
+):
+    """Each Signor keeps #generale inline while its configured #chat opens a thread."""
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
+    monkeypatch.setenv("DISCORD_AUTO_THREAD_CHANNELS", chat_id)
+    monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", general_id)
+    monkeypatch.setenv("DISCORD_NO_THREAD_CHANNELS", general_id)
+    adapter._auto_create_thread = AsyncMock(return_value=FakeThread(channel_id=999, name=profile))
+
+    await adapter._handle_message(
+        make_message(channel=FakeTextChannel(channel_id=int(general_id)), content="continuous general")
+    )
+    adapter._auto_create_thread.assert_not_awaited()
+
+    bot_user = adapter._client.user
+    message = make_message(
+        channel=FakeTextChannel(channel_id=int(chat_id)),
+        content=f"<@{bot_user.id}> isolated chat",
+        mentions=[bot_user],
+    )
+    message.id = 124
+    await adapter._handle_message(message)
+    adapter._auto_create_thread.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (["1532453597344956467", 1532453678093566033], "1532453597344956467,1532453678093566033"),
+        ("1532453693255843981,1532453710679244892", "1532453693255843981,1532453710679244892"),
+    ],
+)
+def test_discord_yaml_auto_thread_channels_bridge(monkeypatch, configured, expected):
+    monkeypatch.delenv("DISCORD_AUTO_THREAD_CHANNELS", raising=False)
+
+    _apply_yaml_config({}, {"auto_thread_channels": configured})
+
+    assert os.environ["DISCORD_AUTO_THREAD_CHANNELS"] == expected
 
 
 @pytest.mark.asyncio
