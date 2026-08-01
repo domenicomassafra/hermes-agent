@@ -2342,7 +2342,11 @@ class SessionStore:
                             "auto-reset notice (reason=%s)", _reset_reason,
                         )
                     entry = None
-                    _needs_recover = True
+                    # An overdue reset is authoritative even though the
+                    # old entry had already been ended by another path.  Do
+                    # not let the DB recovery lookup resurrect that expired
+                    # transcript; create a fresh session quietly instead.
+                    _needs_recover = not bool(_reset_reason)
                 elif entry.session_id != _stale_session_id:
                     # Another thread handled this entry during our lock-free
                     # window.  Treat as healthy -- bump updated_at and save.
