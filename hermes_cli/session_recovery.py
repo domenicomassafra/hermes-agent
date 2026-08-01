@@ -44,6 +44,8 @@ _TOPIC_TABLES = (
     "telegram_dm_topic_bindings",
 )
 
+_SOURCE_TABLES = (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES)
+
 # These values describe derived indexes or the schema that owns an optional
 # table. A fresh destination must generate them from its own current schema.
 _GENERATED_META_KEYS = frozenset({
@@ -254,6 +256,8 @@ def _table_inventory(
     conn: sqlite3.Connection,
     table: str,
 ) -> dict[str, Any]:
+    if table not in _SOURCE_TABLES:
+        raise ValueError(f"unsupported recovery source table: {table}")
     result: dict[str, Any] = {"available": False, "columns": [], "rows": None}
     try:
         columns = _table_columns(conn, table)
@@ -262,7 +266,7 @@ def _table_inventory(
         result["available"] = True
         result["columns"] = columns
         result["rows"] = int(
-            conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            conn.execute(f'SELECT COUNT(*) FROM "{table}" NOT INDEXED').fetchone()[0]
         )
     except sqlite3.DatabaseError as exc:
         result["error"] = str(exc)
@@ -281,7 +285,7 @@ def _inspect_connection(conn: sqlite3.Connection) -> dict[str, Any]:
         # A damaged journal pragma must not block rows that are still readable.
         report["warnings"].append(f"journal mode: {exc}")
 
-    for table in (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES):
+    for table in _SOURCE_TABLES:
         report["tables"][table] = _table_inventory(conn, table)
 
     for required in ("sessions", "messages"):
@@ -362,6 +366,8 @@ def _copy_table(
     progress_cb: Optional[ProgressCallback],
     source_rows: Optional[int],
 ) -> dict[str, Any]:
+    if table not in _SOURCE_TABLES:
+        raise ValueError(f"unsupported recovery source table: {table}")
     source_columns = _table_columns(source, table)
     destination_columns = _table_columns(destination, table)
     columns = [column for column in destination_columns if column in source_columns]
@@ -380,7 +386,7 @@ def _copy_table(
 
     quoted = ", ".join(f'"{column}"' for column in columns)
     placeholders = ", ".join("?" for _ in columns)
-    select_sql = f'SELECT {quoted} FROM "{table}"'
+    select_sql = f'SELECT {quoted} FROM "{table}" NOT INDEXED'
     insert_prefix = "INSERT OR REPLACE" if table == "state_meta" else "INSERT"
     insert_sql = f'{insert_prefix} INTO "{table}" ({quoted}) VALUES ({placeholders})'
 
@@ -450,7 +456,8 @@ def _copy_state_meta(
     try:
         filtered_source_rows = int(
             source.execute(
-                f"SELECT COUNT(*) FROM state_meta WHERE key NOT IN ({placeholders})",
+                "SELECT COUNT(*) FROM state_meta NOT INDEXED "
+                f"WHERE key NOT IN ({placeholders})",
                 tuple(_GENERATED_META_KEYS),
             ).fetchone()[0]
         )
@@ -460,7 +467,8 @@ def _copy_state_meta(
 
     try:
         cursor = source.execute(
-            f"SELECT key, value FROM state_meta WHERE key NOT IN ({placeholders})",
+            "SELECT key, value FROM state_meta NOT INDEXED "
+            f"WHERE key NOT IN ({placeholders})",
             tuple(_GENERATED_META_KEYS),
         )
         while True:

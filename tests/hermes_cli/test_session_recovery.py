@@ -114,6 +114,114 @@ def _orphan_fts_schema(path: Path) -> None:
         conn.close()
 
 
+def _corrupt_index_root_page(path: Path, index: str) -> None:
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        row = conn.execute(
+            "SELECT rootpage FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (index,),
+        ).fetchone()
+        assert row is not None
+        root_page = int(row[0])
+    finally:
+        conn.close()
+
+    with path.open("r+b", buffering=0) as handle:
+        handle.seek((root_page - 1) * page_size)
+        assert handle.read(1) in {b"\x02", b"\x05", b"\x0a", b"\x0d"}
+        handle.seek((root_page - 1) * page_size)
+        handle.write(b"\x00")
+
+
+def test_recovery_ignores_corrupt_secondary_index_for_inventory_and_copy(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "bad-message-index.db"
+    output = tmp_path / "recovered.db"
+    expected = _make_source(source)
+
+    conn = sqlite3.connect(str(source), isolation_level=None)
+    try:
+        conn.execute("CREATE INDEX recovery_bad_count_idx ON messages(role)")
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM messages"
+        ).fetchall()
+        assert any("recovery_bad_count_idx" in str(row[3]) for row in plan)
+    finally:
+        conn.close()
+    _corrupt_index_root_page(source, "recovery_bad_count_idx")
+
+    conn = sqlite3.connect(str(source), isolation_level=None)
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+            conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+        assert (
+            conn.execute("SELECT COUNT(*) FROM messages NOT INDEXED").fetchone()[0]
+            == expected["messages"]
+        )
+    finally:
+        conn.close()
+
+    inspection = inspect_session_database(source, work_dir=tmp_path)
+    assert inspection["recoverable"] is True
+    assert inspection["tables"]["messages"]["rows"] == expected["messages"]
+
+    report = recover_session_database(source, output, work_dir=tmp_path)
+    assert report["complete"] is True
+    assert report["copy"]["messages"]["status"] == "complete"
+    assert report["copy"]["messages"]["copied_rows"] == expected["messages"]
+    assert report["verification"]["integrity_check"] == ["ok"]
+    assert set(report["verification"]["fts_checks"].values()) == {"ok"}
+
+
+def test_copy_table_uses_table_scan_when_covering_index_is_corrupt(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.db"
+    destination_path = tmp_path / "destination.db"
+    conn = sqlite3.connect(str(source_path), isolation_level=None)
+    try:
+        conn.execute(
+            "CREATE TABLE messages(id INTEGER PRIMARY KEY, role TEXT, payload TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO messages(role, payload) VALUES (?, ?)",
+            [
+                ("user", "payload" * 100),
+                ("assistant", "payload" * 100),
+                ("user", "payload" * 100),
+            ],
+        )
+        conn.execute("CREATE INDEX recovery_bad_copy_idx ON messages(role)")
+        plan = conn.execute("EXPLAIN QUERY PLAN SELECT role FROM messages").fetchall()
+        assert any("recovery_bad_copy_idx" in str(row[3]) for row in plan)
+    finally:
+        conn.close()
+    _corrupt_index_root_page(source_path, "recovery_bad_copy_idx")
+
+    source = sqlite3.connect(str(source_path), isolation_level=None)
+    destination = sqlite3.connect(str(destination_path), isolation_level=None)
+    try:
+        destination.execute("CREATE TABLE messages(role TEXT)")
+        report = session_recovery._copy_table(
+            source,
+            destination,
+            "messages",
+            chunk_size=2,
+            progress_cb=None,
+            source_rows=3,
+        )
+        assert report["status"] == "complete"
+        assert report["copied_rows"] == 3
+        assert destination.execute(
+            "SELECT role FROM messages ORDER BY rowid"
+        ).fetchall() == [("user",), ("assistant",), ("user",)]
+    finally:
+        destination.close()
+        source.close()
+
+
 def test_recovery_rebuilds_canonical_data_without_opening_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
