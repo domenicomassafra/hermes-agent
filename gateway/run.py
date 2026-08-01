@@ -14069,10 +14069,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # shutdown) — the turn ran to completion, so recovery
             # succeeded and subsequent messages should no longer receive
             # the restart-interruption system note.
+            # Bare test runners built through object.__new__ do not execute
+            # __init__, so they have no shutdown event. Treat that as the
+            # normal running state; real GatewayRunner instances always set it.
+            _shutdown_event = getattr(self, "_shutdown_event", None)
             if (
                 session_key
                 and not self._draining
-                and not self._shutdown_event.is_set()
+                and not (_shutdown_event is not None and _shutdown_event.is_set())
                 and _should_clear_resume_pending_after_turn(agent_result)
             ):
                 self._clear_restart_failure_count(session_key)
